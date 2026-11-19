@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-android-apk:
@@ -41,6 +41,12 @@ jobs:
       - name: Cache Gradle Dependencies
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Cache Android Signing Keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/release.keystore
+          key: android-release-keystore-v1
+
       - name: Install Node Dependencies
         run: npm ci --no-audit --no-fund
 
@@ -52,21 +58,83 @@ jobs:
       - name: Sync Capacitor Android Project
         run: npx cap sync android
 
-      - name: Build Native Debug APK
+      - name: Build Native Release APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Prepare APK Artifact
+      - name: Zipalign, Sign (v1/v2/v3) & Verify APK
         run: |
-          mkdir -p apk-output
-          cp android/app/build/outputs/apk/debug/app-debug.apk apk-output/Gas-Station-Simulator.apk
+          mkdir -p ~/.android apk-output
+          KEYSTORE_PATH="$HOME/.android/release.keystore"
+          if [ ! -f "$KEYSTORE_PATH" ]; then
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias gasstation \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass gasstation123 \
+              -keypass gasstation123 \
+              -dname "CN=Zaidi Interactive, OU=Mobile, O=Zaidi Interactive, L=Karachi, S=Sindh, C=PK"
+          fi
+
+          UNSIGNED_APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          echo "Found APK: $UNSIGNED_APK"
+          test -f "$UNSIGNED_APK"
+
+          BUILD_TOOLS_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0"
+          "$BUILD_TOOLS_DIR/zipalign" -f -p 4 "$UNSIGNED_APK" apk-output/aligned.apk
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias gasstation \
+            --ks-pass pass:gasstation123 \
+            --key-pass pass:gasstation123 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out apk-output/Gas-Station-Simulator.apk \
+            apk-output/aligned.apk
+          rm -f apk-output/aligned.apk apk-output/Gas-Station-Simulator.apk.idsig
+
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose --print-certs apk-output/Gas-Station-Simulator.apk
+          "$BUILD_TOOLS_DIR/aapt2" dump badging apk-output/Gas-Station-Simulator.apk | grep -E "^(package:|sdkVersion:|targetSdkVersion:|launchable-activity:)"
           ls -lh apk-output/Gas-Station-Simulator.apk
 
-      - name: Upload APK Artifact
+      - name: Upload Direct APK to GitHub Release (No ZIP Extraction Needed)
+        id: release_apk
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view latest-apk >/dev/null 2>&1; then
+            gh release upload latest-apk apk-output/Gas-Station-Simulator.apk --clobber
+            gh release edit latest-apk \
+              --title "Gas Station Simulator APK (Build #${{ github.run_number }})" \
+              --notes "Direct Android APK download (no ZIP extraction required). Tap Gas-Station-Simulator.apk below to install on Android 7.0+."
+          else
+            gh release create latest-apk apk-output/Gas-Station-Simulator.apk \
+              --target "${{ github.sha }}" \
+              --title "Gas Station Simulator APK (Build #${{ github.run_number }})" \
+              --notes "Direct Android APK download (no ZIP extraction required). Tap Gas-Station-Simulator.apk below to install on Android 7.0+."
+          fi
+
+      - name: Upload APK Artifact (Uncompressed ZIP Wrapper)
         uses: actions/upload-artifact@v4
         with:
           name: Gas-Station-Simulator-APK
           path: apk-output/Gas-Station-Simulator.apk
+          compression-level: 0
           retention-days: 30
+
+      - name: Write Direct Download Link to Build Summary
+        run: |
+          {
+            echo "## Gas Station Simulator APK Ready"
+            echo ""
+            echo "**Direct APK Download (No ZIP Extraction Needed):**"
+            echo "https://github.com/${{ github.repository }}/releases/download/latest-apk/Gas-Station-Simulator.apk"
+            echo ""
+            echo "If downloading from Artifacts on Android, use **ZArchiver** or **Files by Google** to extract if your built-in file manager cannot open GitHub ZIP64 archives, or use the direct Releases APK link above."
+          } >> "$GITHUB_STEP_SUMMARY"
