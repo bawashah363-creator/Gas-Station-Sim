@@ -1,11 +1,237 @@
 import {
+  BusinessRatingRecord,
+  BusinessRatingsState,
   BusinessUnlockId,
+  CustomerFeedbackEvent,
   CustomHudLayout,
   DayPhase,
   EmployeeRecord,
   GameHUDState,
   GameTask,
+  HappinessState,
+  PriceStatus,
+  PricingSettings,
+  ShopBasketItem,
+  ShopProductDefinition,
+  ShopProductId,
+  UpgradeState,
 } from './types';
+
+export function roundCents(val: number): number {
+  return Math.round(val * 100) / 100;
+}
+
+export const MARKET_FUEL_PRICE = 2.2;
+export const WHOLESALE_FUEL_COST = 0.44;
+export const MIN_FUEL_PRICE = 1.0;
+export const MAX_FUEL_PRICE = 4.5;
+export const FUEL_PRICE_STEP = 0.1;
+
+export const SHOP_PRODUCTS: ShopProductDefinition[] = [
+  {
+    id: 'cold_drink',
+    name: 'Cold Drink',
+    costPrice: 1.0,
+    marketPrice: 1.6,
+    minPrice: 1.0,
+    maxPrice: 3.2,
+    step: 0.1,
+  },
+  {
+    id: 'chips_snacks',
+    name: 'Chips & Snacks',
+    costPrice: 1.4,
+    marketPrice: 2.2,
+    minPrice: 1.4,
+    maxPrice: 4.4,
+    step: 0.1,
+  },
+  {
+    id: 'hot_coffee',
+    name: 'Hot Coffee',
+    costPrice: 1.2,
+    marketPrice: 2.0,
+    minPrice: 1.2,
+    maxPrice: 4.0,
+    step: 0.1,
+  },
+  {
+    id: 'energy_bar',
+    name: 'Energy Bar',
+    costPrice: 1.8,
+    marketPrice: 2.8,
+    minPrice: 1.8,
+    maxPrice: 5.6,
+    step: 0.1,
+  },
+  {
+    id: 'motor_oil',
+    name: 'Motor Oil & Gear',
+    costPrice: 4.5,
+    marketPrice: 7.0,
+    minPrice: 4.5,
+    maxPrice: 14.0,
+    step: 0.25,
+  },
+];
+
+export function createDefaultPricing(): PricingSettings {
+  return {
+    fuelPricePerLitre: MARKET_FUEL_PRICE,
+    shopProductPrices: {
+      cold_drink: 1.6,
+      chips_snacks: 2.2,
+      hot_coffee: 2.0,
+      energy_bar: 2.8,
+      motor_oil: 7.0,
+    },
+  };
+}
+
+export function createDefaultRatings(): BusinessRatingsState {
+  return {
+    fuel: {
+      rating: 3.5,
+      reviewCount: 4,
+      happyCustomers: 3,
+      angryCustomers: 0,
+      lastHappiness: 'Happy',
+    },
+    shop: {
+      rating: 3.5,
+      reviewCount: 4,
+      happyCustomers: 3,
+      angryCustomers: 0,
+      lastHappiness: 'Happy',
+    },
+  };
+}
+
+export function getPriceStatus(sellingPrice: number, marketPrice: number): PriceStatus {
+  const ratio = sellingPrice / Math.max(0.01, marketPrice);
+  if (ratio <= 0.85) return 'Cheap';
+  if (ratio <= 1.05) return 'Fair';
+  if (ratio <= 1.25) return 'Expensive';
+  return 'Very Expensive';
+}
+
+export function getShopAveragePriceRatio(pricing: PricingSettings): number {
+  let sum = 0;
+  for (const prod of SHOP_PRODUCTS) {
+    const price = pricing.shopProductPrices[prod.id] ?? prod.marketPrice;
+    sum += price / prod.marketPrice;
+  }
+  return sum / SHOP_PRODUCTS.length;
+}
+
+export function generateShopBasket(
+  shopStockLevel: number,
+  hasDeluxe: boolean
+): ShopBasketItem[] {
+  const itemCount = hasDeluxe
+    ? 3 + (Math.random() < 0.5 ? 1 : 0)
+    : Math.min(4, 2 + (shopStockLevel >= 3 || Math.random() < 0.55 ? 1 : 0));
+
+  const pool = [...SHOP_PRODUCTS];
+  const basket: ShopBasketItem[] = [];
+
+  for (let i = 0; i < itemCount && pool.length > 0; i++) {
+    const idx = Math.floor(Math.random() * pool.length);
+    const prod = pool.splice(idx, 1)[0];
+    const maxQty = prod.id === 'motor_oil' ? (hasDeluxe ? 2 : 1) : hasDeluxe ? 3 : 2;
+    const qty = 1 + Math.floor(Math.random() * maxQty);
+    basket.push({ productId: prod.id, name: prod.name, qty });
+  }
+  return basket;
+}
+
+export function calculateShopBasketTotal(
+  basket: ShopBasketItem[],
+  pricing: PricingSettings
+): number {
+  let total = 0;
+  for (const item of basket) {
+    const def = SHOP_PRODUCTS.find((p) => p.id === item.productId);
+    const unitPrice = pricing.shopProductPrices[item.productId] ?? def?.marketPrice ?? 2.0;
+    total += unitPrice * item.qty;
+  }
+  return roundCents(Math.max(0.5, total));
+}
+
+export function calculateFuelPayment(
+  fuelLiters: number,
+  fuelPricePerLitre: number
+): number {
+  return roundCents(Math.max(1, fuelLiters) * Math.max(0.5, fuelPricePerLitre));
+}
+
+export function evaluateCustomerSatisfaction(params: {
+  served: boolean;
+  waitSec: number;
+  priceRatio: number;
+  customerTolerance: number;
+  speedBonus?: number;
+}): { score: number; happiness: HappinessState } {
+  if (!params.served) {
+    return { score: 1.0, happiness: 'Angry' };
+  }
+
+  let waitScore = 4.8;
+  if (params.waitSec > 50) waitScore = 2.2;
+  else if (params.waitSec > 38) waitScore = 3.0;
+  else if (params.waitSec > 25) waitScore = 3.8;
+  else if (params.waitSec > 12) waitScore = 4.35;
+
+  const effectiveRatio = params.priceRatio / Math.max(0.75, params.customerTolerance);
+  let priceAdj = 0.15;
+  if (effectiveRatio <= 0.85) priceAdj = 0.45;
+  else if (effectiveRatio <= 1.05) priceAdj = 0.2;
+  else if (effectiveRatio <= 1.25) priceAdj = -0.65;
+  else priceAdj = -1.45;
+
+  const bonus = params.speedBonus ?? 0;
+  const raw = waitScore + priceAdj + bonus;
+  const score = Math.min(5.0, Math.max(1.0, Math.round(raw * 10) / 10));
+
+  let happiness: HappinessState = 'Neutral';
+  if (score >= 4.4) happiness = 'Very Happy';
+  else if (score >= 3.6) happiness = 'Happy';
+  else if (score >= 2.7) happiness = 'Neutral';
+  else if (score >= 1.8) happiness = 'Impatient';
+  else happiness = 'Angry';
+
+  return { score, happiness };
+}
+
+export function applyRatingFeedback(
+  prev: BusinessRatingRecord,
+  feedback: CustomerFeedbackEvent
+): BusinessRatingRecord {
+  const alpha = feedback.served ? 0.11 : 0.14;
+  const nextRating = Math.min(
+    5.0,
+    Math.max(1.0, roundCents(prev.rating * (1 - alpha) + feedback.score * alpha))
+  );
+  const isHappy =
+    feedback.happiness === 'Very Happy' || feedback.happiness === 'Happy';
+  const isAngry = !feedback.served || feedback.happiness === 'Angry';
+
+  return {
+    rating: nextRating,
+    reviewCount: prev.reviewCount + 1,
+    happyCustomers: prev.happyCustomers + (isHappy ? 1 : 0),
+    angryCustomers: prev.angryCustomers + (isAngry ? 1 : 0),
+    lastHappiness: feedback.happiness,
+  };
+}
+
+export function getTrafficDemandLabel(rating: number): string {
+  if (rating < 1.8) return 'Very Low';
+  if (rating < 2.6) return 'Low';
+  if (rating < 3.6) return 'Normal';
+  if (rating < 4.4) return 'High';
+  return 'Very High';
+}
 
 export interface LevelMilestone {
   level: number;
@@ -362,11 +588,69 @@ export function createInitialGameState(): GameHUDState {
       carsFueled: 0,
       carsWashed: 0,
       shopSales: 0,
+      shopIncome: 0,
       roomsRented: 0,
       totalEarned: 0,
     },
+    ratings: createDefaultRatings(),
+    pricing: createDefaultPricing(),
     toastMessage: null,
   };
+}
+
+export function calculateServiceCoins(
+  category: 'fuel' | 'shop' | 'wash' | 'rooms' | 'supply',
+  baseRewardCoins: number,
+  upgrades: UpgradeState,
+  unlockedBusinesses: ReadonlyArray<BusinessUnlockId> | ReadonlySet<BusinessUnlockId>,
+  byWorker = false
+): number {
+  if (baseRewardCoins <= 0) return roundCents(baseRewardCoins);
+  if (category === 'fuel' || category === 'shop') {
+    return roundCents(baseRewardCoins);
+  }
+
+  const hasBiz = (id: BusinessUnlockId) =>
+    Array.isArray(unlockedBusinesses)
+      ? unlockedBusinesses.includes(id)
+      : (unlockedBusinesses as ReadonlySet<BusinessUnlockId>).has(id);
+
+  let mult = 1;
+  if (category === 'wash') {
+    mult =
+      (1 + (upgrades.carWashLevel - 1) * 0.25) *
+      (hasBiz('wash_pro') ? 1.4 : 1);
+  }
+  if (category === 'rooms') {
+    mult =
+      (1 + (upgrades.roomsLevel - 1) * 0.3) *
+      (hasBiz('rooms_wing') ? 1.45 : 1);
+  }
+  const workerCoinMult = byWorker ? 0.72 : 1;
+  return Math.max(1, Math.round(baseRewardCoins * mult * workerCoinMult));
+}
+
+export function calculateServiceXp(
+  category: 'fuel' | 'shop' | 'wash' | 'rooms' | 'supply',
+  baseRewardXp: number,
+  byWorker = false
+): number {
+  if (category === 'fuel') {
+    return byWorker ? 85 : 150;
+  }
+  if (category === 'shop') {
+    return byWorker ? 58 : 120;
+  }
+  if (category === 'wash') {
+    return byWorker ? 75 : 135;
+  }
+  if (category === 'rooms') {
+    if (baseRewardXp <= 10) {
+      return byWorker ? 40 : 75;
+    }
+    return byWorker ? 95 : 165;
+  }
+  return byWorker ? Math.max(1, Math.round(baseRewardXp * 0.5)) : baseRewardXp;
 }
 
 export function getUnlockedForLevel(level: number): BusinessUnlockId[] {

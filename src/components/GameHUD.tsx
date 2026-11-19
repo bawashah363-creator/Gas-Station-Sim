@@ -16,10 +16,12 @@ import {
   Plus,
   Settings,
   ShoppingCart,
+  Star,
   Store,
   Sun,
   Sunrise,
   Sunset,
+  Tag,
   Trophy,
   Users,
   ZoomIn,
@@ -31,8 +33,11 @@ import {
   GameHUDState,
   GameSettings,
   JoystickVector,
+  LiveFuelState,
+  LiveShopSaleState,
   PlayerOutfitId,
 } from '../game/types';
+import { LiveTransactionsPanel } from './LiveTransactionsPanel';
 import { PlayerAvatarSvg } from './PlayerAvatarSvg';
 import { VirtualJoystick } from './VirtualJoystick';
 
@@ -41,16 +46,30 @@ export type ModalType =
   | 'staff'
   | 'upgrades'
   | 'shop'
+  | 'pricing'
   | 'roadmap'
   | 'settings'
   | 'stats'
   | null;
+
+function formatMoney(amount: number): string {
+  const rounded = Math.round(amount * 100) / 100;
+  if (Number.isInteger(rounded)) {
+    return `$${rounded.toLocaleString()}`;
+  }
+  return `$${rounded.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
 
 interface GameHUDProps {
   hud: GameHUDState;
   settings: GameSettings;
   hudLayout: CustomHudLayout;
   playerOutfit: PlayerOutfitId;
+  liveFuel: LiveFuelState | null;
+  lastShopSale: LiveShopSaleState | null;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onOpenModal: (modal: ModalType) => void;
@@ -66,6 +85,8 @@ export function GameHUD({
   settings,
   hudLayout,
   playerOutfit,
+  liveFuel,
+  lastShopSale,
   isFullscreen,
   onToggleFullscreen,
   onOpenModal,
@@ -159,12 +180,12 @@ export function GameHUD({
           </div>
         </div>
 
-        {/* Top-Center: Compact Money, Fuel, Shop Stock, Gems, Day & Time */}
+        {/* Top-Center: Compact Money, Fuel, Shop Stock, Ratings, Gems, Day & Time */}
         <div className="pointer-events-auto flex items-center justify-center gap-1 flex-wrap">
           <div className={`flex items-center gap-1 rounded-lg px-2 py-1 ${creamPill}`}>
             <Coins className="w-3.5 h-3.5 text-[#D97706] shrink-0" />
             <span className="font-mono-nums font-extrabold text-[11px] whitespace-nowrap">
-              ${hud.coins.toLocaleString()}
+              {formatMoney(hud.coins)}
             </span>
           </div>
 
@@ -198,6 +219,36 @@ export function GameHUD({
                 <Plus className="w-3 h-3 stroke-[2.8]" />
               </button>
             </div>
+          )}
+
+          {/* Independent Fuel Station 5-Star Rating Pill */}
+          <button
+            type="button"
+            onClick={() => onOpenModal('pricing')}
+            title="Fuel Station Rating & Pricing"
+            className={`flex items-center gap-1 rounded-lg px-1.5 py-1 ${creamBtn}`}
+          >
+            <Fuel className="w-3 h-3 text-[#DC2626] shrink-0" />
+            <Star className="w-3 h-3 text-[#F59E0B] fill-[#F59E0B] shrink-0" />
+            <span className="font-mono-nums font-extrabold text-[10.5px] whitespace-nowrap">
+              {hud.ratings.fuel.rating.toFixed(1)}
+            </span>
+          </button>
+
+          {/* Independent Shop 5-Star Rating Pill */}
+          {shopUnlocked && (
+            <button
+              type="button"
+              onClick={() => onOpenModal('pricing')}
+              title="Shop Rating & Product Pricing"
+              className={`flex items-center gap-1 rounded-lg px-1.5 py-1 ${creamBtn}`}
+            >
+              <Store className="w-3 h-3 text-[#2563EB] shrink-0" />
+              <Star className="w-3 h-3 text-[#F59E0B] fill-[#F59E0B] shrink-0" />
+              <span className="font-mono-nums font-extrabold text-[10.5px] whitespace-nowrap">
+                {hud.ratings.shop.rating.toFixed(1)}
+              </span>
+            </button>
           )}
 
           <button
@@ -269,6 +320,14 @@ export function GameHUD({
         </div>
       )}
 
+      {/* LEFT SIDE COMPACT LIVE FUELING & SHOP INCOME PANEL */}
+      <LiveTransactionsPanel
+        liveFuel={liveFuel}
+        lastShopSale={lastShopSale}
+        shopIncome={hud.stats.shopIncome ?? 0}
+        shopUnlocked={shopUnlocked}
+      />
+
       {/* RIGHT SIDE RAIL: Compact Equally Spaced Menu Buttons */}
       <div
         style={{ right: 'max(8px, var(--safe-right))' }}
@@ -301,6 +360,11 @@ export function GameHUD({
             id: 'shop' as ModalType,
             label: 'Supply',
             icon: <ShoppingCart className="w-3.5 h-3.5 text-[#16A34A] shrink-0" />,
+          },
+          {
+            id: 'pricing' as ModalType,
+            label: 'Prices',
+            icon: <Tag className="w-3.5 h-3.5 text-[#EA580C] shrink-0" />,
           },
         ].map((btn) => (
           <button

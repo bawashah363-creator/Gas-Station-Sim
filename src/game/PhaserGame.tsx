@@ -3,11 +3,15 @@ import Phaser from 'phaser';
 import { GasStationScene, SceneCallbacks } from './GasStationScene';
 import {
   ActiveServicePrompt,
+  BusinessRatingsState,
   BusinessUnlockId,
+  CustomerFeedbackEvent,
   DayPhase,
   EmployeeRecord,
   EquippedCosmetics,
   JoystickVector,
+  LiveFuelState,
+  PricingSettings,
   UpgradeState,
 } from './types';
 
@@ -25,7 +29,10 @@ export interface PhaserGameHandle {
     upgrades: UpgradeState,
     dayPhase: DayPhase,
     washSupplies?: number,
-    roomNeedsClean?: boolean
+    roomNeedsClean?: boolean,
+    shopStock?: number,
+    ratings?: BusinessRatingsState,
+    pricing?: PricingSettings
   ) => void;
 }
 
@@ -36,12 +43,17 @@ interface PhaserGameProps {
   initialDayPhase: DayPhase;
   initialWashSupplies: number;
   initialRoomNeedsClean: boolean;
+  initialShopStock: number;
+  initialRatings: BusinessRatingsState;
+  initialPricing: PricingSettings;
   initialEquipped: EquippedCosmetics;
   initialSensitivity: number;
   initialGraphicsQuality: 'high' | 'balanced';
   onPromptChange: (prompt: ActiveServicePrompt | null) => void;
   onActionProgress: (progress: number | null) => void;
   onServiceExecute: (prompt: ActiveServicePrompt, byWorker?: boolean) => boolean;
+  onLiveFuelChange?: (fuel: LiveFuelState | null) => void;
+  onCustomerFeedback?: (feedback: CustomerFeedbackEvent) => void;
   onSceneReady?: () => void;
 }
 
@@ -54,12 +66,17 @@ export const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
       initialDayPhase,
       initialWashSupplies,
       initialRoomNeedsClean,
+      initialShopStock,
+      initialRatings,
+      initialPricing,
       initialEquipped,
       initialSensitivity,
       initialGraphicsQuality,
       onPromptChange,
       onActionProgress,
       onServiceExecute,
+      onLiveFuelChange,
+      onCustomerFeedback,
       onSceneReady,
     },
     ref
@@ -72,9 +89,18 @@ export const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
       onPromptChange,
       onActionProgress,
       onServiceExecute,
+      onLiveFuelChange,
+      onCustomerFeedback,
       onSceneReady,
     });
-    callbacksRef.current = { onPromptChange, onActionProgress, onServiceExecute, onSceneReady };
+    callbacksRef.current = {
+      onPromptChange,
+      onActionProgress,
+      onServiceExecute,
+      onLiveFuelChange,
+      onCustomerFeedback,
+      onSceneReady,
+    };
 
     useImperativeHandle(ref, () => ({
       setJoystick(vec: JoystickVector) {
@@ -106,14 +132,27 @@ export const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
       triggerLevelUpCelebration(level: number) {
         sceneRef.current?.triggerLevelUpCelebration(level);
       },
-      syncProgress(unlocked, employees, upgrades, dayPhase, washSupplies, roomNeedsClean) {
+      syncProgress(
+        unlocked,
+        employees,
+        upgrades,
+        dayPhase,
+        washSupplies,
+        roomNeedsClean,
+        shopStock,
+        ratings,
+        pricing
+      ) {
         sceneRef.current?.syncProgress(
           unlocked,
           employees,
           upgrades,
           dayPhase,
           washSupplies,
-          roomNeedsClean
+          roomNeedsClean,
+          shopStock,
+          ratings,
+          pricing
         );
       },
     }));
@@ -153,6 +192,10 @@ export const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
             callbacksRef.current.onActionProgress(prog),
           onServiceExecute: (p: ActiveServicePrompt, byWorker?: boolean) =>
             callbacksRef.current.onServiceExecute(p, byWorker),
+          onLiveFuelChange: (fuel: LiveFuelState | null) =>
+            callbacksRef.current.onLiveFuelChange?.(fuel),
+          onCustomerFeedback: (feedback: CustomerFeedbackEvent) =>
+            callbacksRef.current.onCustomerFeedback?.(feedback),
           onSceneReady: () => callbacksRef.current.onSceneReady?.(),
         },
         unlockedBusinesses: initialUnlocked,
@@ -161,6 +204,9 @@ export const PhaserGame = forwardRef<PhaserGameHandle, PhaserGameProps>(
         dayPhase: initialDayPhase,
         washSupplies: initialWashSupplies,
         roomNeedsClean: initialRoomNeedsClean,
+        shopStock: initialShopStock,
+        ratings: initialRatings,
+        pricing: initialPricing,
         equipped: initialEquipped,
         cameraSensitivity: initialSensitivity,
         graphicsQuality: initialGraphicsQuality,

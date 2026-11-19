@@ -6,11 +6,16 @@ import {
   Gem,
   Lock,
   Maximize2,
+  Minus,
   Music,
   Package,
   Play,
+  Plus,
   RotateCcw,
   Sliders,
+  Star,
+  Store,
+  Tag,
   Trash2,
   Trees,
   Users,
@@ -18,15 +23,68 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { UNLOCK_CATALOG } from '../game/progression';
+import {
+  FUEL_PRICE_STEP,
+  getPriceStatus,
+  getTrafficDemandLabel,
+  MARKET_FUEL_PRICE,
+  MAX_FUEL_PRICE,
+  MIN_FUEL_PRICE,
+  roundCents,
+  SHOP_PRODUCTS,
+  UNLOCK_CATALOG,
+  WHOLESALE_FUEL_COST,
+} from '../game/progression';
 import {
   BusinessUnlockId,
   EmployeeRoleId,
   GameHUDState,
   GameSettings,
+  HappinessState,
+  PriceStatus,
+  ShopProductId,
   UpgradeState,
 } from '../game/types';
 import { ModalType } from './GameHUD';
+
+function formatMoney(amount: number): string {
+  const rounded = roundCents(amount);
+  if (Number.isInteger(rounded)) {
+    return `$${rounded.toLocaleString()}`;
+  }
+  return `$${rounded.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function getPriceBadgeClass(status: PriceStatus): string {
+  switch (status) {
+    case 'Cheap':
+      return 'bg-[#DCFCE7] border-[#86EFAC] text-[#15803D]';
+    case 'Fair':
+      return 'bg-[#FEF3C7] border-[#FCD34D] text-[#B45309]';
+    case 'Expensive':
+      return 'bg-[#FFEDD5] border-[#FDBA74] text-[#C2410C]';
+    case 'Very Expensive':
+      return 'bg-[#FEE2E2] border-[#FCA5A5] text-[#B91C1C]';
+  }
+}
+
+function getMoodEmoji(mood: HappinessState): string {
+  switch (mood) {
+    case 'Very Happy':
+      return '🤩';
+    case 'Happy':
+      return '😊';
+    case 'Neutral':
+      return '😐';
+    case 'Impatient':
+      return '😠';
+    case 'Angry':
+      return '😡';
+  }
+}
 
 interface GameModalsProps {
   activeModal: ModalType;
@@ -43,6 +101,9 @@ interface GameModalsProps {
   onBuyShopSupply: (units: number, costCoins: number) => void;
   onBuyWashSupply: (units: number, costCoins: number) => void;
   onUnlockBusiness: (id: BusinessUnlockId) => void;
+  onUpdateFuelPrice: (nextPrice: number) => void;
+  onUpdateShopProductPrice: (productId: ShopProductId, nextPrice: number) => void;
+  onResetDefaultPrices: () => void;
   onUpdateSettings: (partial: Partial<GameSettings>) => void;
   onRestoreAudioDefaults: () => void;
   onEnterHudEdit: () => void;
@@ -66,6 +127,9 @@ export function GameModals({
   onBuyShopSupply,
   onBuyWashSupply,
   onUnlockBusiness,
+  onUpdateFuelPrice,
+  onUpdateShopProductPrice,
+  onResetDefaultPrices,
   onUpdateSettings,
   onRestoreAudioDefaults,
   onEnterHudEdit,
@@ -111,6 +175,7 @@ export function GameModals({
     staff: 'Employee Management',
     upgrades: 'Station Upgrades',
     shop: 'Fuel & Shop Inventory',
+    pricing: 'Pricing & Business Ratings',
     roadmap: 'Business Unlock Roadmap',
     settings: 'Settings & Controls',
     stats: 'Business Overview',
@@ -127,7 +192,7 @@ export function GameModals({
     {
       key: 'pumpSpeedLevel',
       name: 'High-Flow Fuel Nozzles',
-      desc: 'Refuels faster and boosts fuel service payouts by +20% per level.',
+      desc: 'Speeds up fueling, reduces customer wait times, and boosts fuel satisfaction.',
       baseCost: 220,
       unlocked: true,
     },
@@ -141,7 +206,7 @@ export function GameModals({
     {
       key: 'shopStockLevel',
       name: 'Store Shelves & Coolers',
-      desc: 'Expands shop capacity (+15 stock) and boosts checkout profits.',
+      desc: 'Expands shop capacity (+15 stock) and increases multi-item customer baskets.',
       baseCost: 420,
       unlocked: hud.unlockedBusinesses.includes('shop'),
       reqLabel: 'Unlocks Lv.3',
@@ -470,6 +535,238 @@ export function GameModals({
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeModal === 'pricing' && (
+            <div className="space-y-3.5">
+              {/* Independent Business 5-Star Ratings Overview */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {[
+                  {
+                    id: 'fuel' as const,
+                    title: 'Fuel Station Rating',
+                    record: hud.ratings.fuel,
+                    unlocked: true,
+                    icon: <Fuel className="w-4 h-4 text-[#DC2626]" />,
+                    accentBg: 'bg-red-100',
+                  },
+                  {
+                    id: 'shop' as const,
+                    title: 'Convenience Shop Rating',
+                    record: hud.ratings.shop,
+                    unlocked: hud.unlockedBusinesses.includes('shop'),
+                    icon: <Store className="w-4 h-4 text-[#2563EB]" />,
+                    accentBg: 'bg-blue-100',
+                  },
+                ].map((biz) => {
+                  const trafficLabel = getTrafficDemandLabel(biz.record.rating);
+                  return (
+                    <div
+                      key={biz.id}
+                      className="bg-[#FFFDF7] rounded-2xl p-3.5 border border-[#DFCFB1] shadow-sm space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`w-8 h-8 rounded-xl ${biz.accentBg} flex items-center justify-center shrink-0`}
+                          >
+                            {biz.icon}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-display font-extrabold text-xs truncate">
+                              {biz.title}
+                            </div>
+                            <div className="text-[10.5px] text-[#6B5A4E] font-semibold">
+                              Traffic:{' '}
+                              <span className="text-[#2E221D] font-bold">
+                                {biz.unlocked ? trafficLabel : 'Unlocks Lv.3'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="px-2 py-1 rounded-xl bg-[#FEF3C7] border border-[#F59E0B] flex items-center gap-1 shrink-0">
+                          <Star className="w-3.5 h-3.5 text-[#D97706] fill-[#F59E0B]" />
+                          <span className="font-mono-nums font-extrabold text-xs text-[#92400E]">
+                            {biz.record.rating.toFixed(1)}/5
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#F3E7CD] font-semibold text-[#6B5A4E]">
+                        <span>
+                          Mood: {getMoodEmoji(biz.record.lastHappiness)}{' '}
+                          <strong className="text-[#2E221D]">{biz.record.lastHappiness}</strong>
+                        </span>
+                        <span className="font-mono-nums">
+                          😊 {biz.record.happyCustomers} · 😡 {biz.record.angryCustomers}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Fuel Price Per Litre Control */}
+              {(() => {
+                const fuelPrice = hud.pricing.fuelPricePerLitre;
+                const fuelStatus = getPriceStatus(fuelPrice, MARKET_FUEL_PRICE);
+                const fuelDiff = roundCents(fuelPrice - MARKET_FUEL_PRICE);
+                const fuelProfit = roundCents(fuelPrice - WHOLESALE_FUEL_COST);
+                return (
+                  <div className="bg-[#FFFDF7] rounded-2xl p-4 border-2 border-[#DFCFB1] space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-red-100 text-[#DC2626] flex items-center justify-center shrink-0">
+                          <Fuel className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="font-display font-extrabold text-sm flex items-center gap-2">
+                            <span>Fuel Price per Litre</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md border text-[10px] font-bold ${getPriceBadgeClass(
+                                fuelStatus
+                              )}`}
+                            >
+                              {fuelStatus}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-[#6B5A4E] font-mono-nums font-semibold">
+                            Cost: ${WHOLESALE_FUEL_COST.toFixed(2)}/L · Market: $
+                            {MARKET_FUEL_PRICE.toFixed(2)}/L · Profit: +${fuelProfit.toFixed(2)}/L
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={fuelPrice <= MIN_FUEL_PRICE + 0.001}
+                          onClick={() => onUpdateFuelPrice(fuelPrice - FUEL_PRICE_STEP)}
+                          aria-label="Decrease Fuel Price"
+                          className="w-9 h-9 rounded-xl bg-[#F5EBD4] hover:bg-[#EFE5CE] disabled:opacity-40 border border-[#D6C4A3] flex items-center justify-center active:scale-95"
+                        >
+                          <Minus className="w-4 h-4" />
+                        </button>
+                        <div className="min-w-[76px] text-center px-2 py-1.5 rounded-xl bg-[#FAF3E3] border border-[#D6C4A3]">
+                          <div className="font-mono-nums font-extrabold text-sm text-[#2E221D]">
+                            ${fuelPrice.toFixed(2)}/L
+                          </div>
+                          <div
+                            className={`text-[9.5px] font-mono-nums font-bold ${
+                              fuelDiff > 0
+                                ? 'text-[#C2410C]'
+                                : fuelDiff < 0
+                                  ? 'text-[#15803D]'
+                                  : 'text-[#6B5A4E]'
+                            }`}
+                          >
+                            {fuelDiff === 0
+                              ? 'At Market'
+                              : `${fuelDiff > 0 ? '+' : '-'}$${Math.abs(fuelDiff).toFixed(2)}`}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={fuelPrice >= MAX_FUEL_PRICE - 0.001}
+                          onClick={() => onUpdateFuelPrice(fuelPrice + FUEL_PRICE_STEP)}
+                          aria-label="Increase Fuel Price"
+                          className="w-9 h-9 rounded-xl bg-[#FFC815] hover:bg-[#FACC15] disabled:opacity-40 border border-[#B45309] flex items-center justify-center active:scale-95"
+                        >
+                          <Plus className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Convenience Shop Product Pricing Controls */}
+              <div className="bg-[#FFFDF7] rounded-2xl p-4 border-2 border-[#DFCFB1] space-y-2.5">
+                <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-[#F3E7CD]">
+                  <div className="flex items-center gap-2">
+                    <Tag className="w-4 h-4 text-[#EA580C]" />
+                    <div>
+                      <div className="font-display font-extrabold text-sm">
+                        Shop Product Pricing
+                      </div>
+                      <div className="text-[11px] text-[#6B5A4E]">
+                        Fair or cheap prices boost ratings & customer arrivals
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onResetDefaultPrices}
+                    className="min-h-[34px] px-2.5 rounded-xl bg-[#F5EBD4] hover:bg-[#EFE5CE] border border-[#D6C4A3] text-[#2E221D] text-[11px] font-bold flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Market Rates</span>
+                  </button>
+                </div>
+
+                {SHOP_PRODUCTS.map((prod) => {
+                  const curPrice =
+                    hud.pricing.shopProductPrices[prod.id] ?? prod.marketPrice;
+                  const status = getPriceStatus(curPrice, prod.marketPrice);
+                  const profit = roundCents(curPrice - prod.costPrice);
+
+                  return (
+                    <div
+                      key={prod.id}
+                      className="flex flex-wrap items-center justify-between gap-2 py-2 border-b last:border-b-0 border-[#F3E7CD]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-display font-bold text-xs sm:text-sm flex items-center gap-1.5">
+                          <span>{prod.name}</span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded border text-[9.5px] font-bold ${getPriceBadgeClass(
+                              status
+                            )}`}
+                          >
+                            {status}
+                          </span>
+                        </div>
+                        <div className="text-[10.5px] text-[#6B5A4E] font-mono-nums font-semibold mt-0.5">
+                          Cost: ${prod.costPrice.toFixed(2)} · Market: $
+                          {prod.marketPrice.toFixed(2)} ·{' '}
+                          <span className="text-[#15803D]">
+                            Profit: +${profit.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={curPrice <= prod.minPrice + 0.001}
+                          onClick={() =>
+                            onUpdateShopProductPrice(prod.id, curPrice - prod.step)
+                          }
+                          aria-label={`Decrease ${prod.name} price`}
+                          className="w-8 h-8 rounded-lg bg-[#F5EBD4] hover:bg-[#EFE5CE] disabled:opacity-40 border border-[#D6C4A3] flex items-center justify-center active:scale-95"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <div className="min-w-[58px] text-center px-2 py-1 rounded-lg bg-[#FAF3E3] border border-[#D6C4A3] font-mono-nums font-extrabold text-xs">
+                          ${curPrice.toFixed(2)}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={curPrice >= prod.maxPrice - 0.001}
+                          onClick={() =>
+                            onUpdateShopProductPrice(prod.id, curPrice + prod.step)
+                          }
+                          aria-label={`Increase ${prod.name} price`}
+                          className="w-8 h-8 rounded-lg bg-[#FFC815] hover:bg-[#FACC15] disabled:opacity-40 border border-[#B45309] flex items-center justify-center active:scale-95"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -821,13 +1118,31 @@ export function GameModals({
                   </div>
                 </div>
               ))}
+              <div className="bg-[#FFFDF7] rounded-2xl p-3.5 border border-[#DFCFB1] flex items-center justify-between">
+                <div>
+                  <div className="text-[11px] text-[#6B5A4E] font-semibold">Fuel Station Rating</div>
+                  <div className="font-display font-extrabold text-lg text-[#B45309] font-mono-nums">
+                    ⭐ {hud.ratings.fuel.rating.toFixed(1)}/5
+                  </div>
+                </div>
+                <span className="text-xl">{getMoodEmoji(hud.ratings.fuel.lastHappiness)}</span>
+              </div>
+              <div className="bg-[#FFFDF7] rounded-2xl p-3.5 border border-[#DFCFB1] flex items-center justify-between">
+                <div>
+                  <div className="text-[11px] text-[#6B5A4E] font-semibold">Shop Rating</div>
+                  <div className="font-display font-extrabold text-lg text-[#2563EB] font-mono-nums">
+                    ⭐ {hud.ratings.shop.rating.toFixed(1)}/5
+                  </div>
+                </div>
+                <span className="text-xl">{getMoodEmoji(hud.ratings.shop.lastHappiness)}</span>
+              </div>
               <div className="col-span-2 bg-[#F3E7CD] rounded-2xl p-4 flex items-center justify-between border border-[#D6C4A3]">
                 <div className="flex items-center gap-2 text-sm font-bold">
                   <Coins className="w-4 h-4 text-[#D97706]" />
                   <span>Total Revenue Earned</span>
                 </div>
                 <div className="flex items-center gap-2 font-mono-nums font-extrabold text-sm">
-                  <span>${hud.stats.totalEarned.toLocaleString()}</span>
+                  <span>{formatMoney(hud.stats.totalEarned)}</span>
                   <span aria-hidden="true">·</span>
                   <Gem className="w-4 h-4 text-[#0284C7]" />
                   <span>{hud.diamonds}</span>

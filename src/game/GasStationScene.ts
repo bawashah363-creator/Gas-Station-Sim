@@ -10,17 +10,35 @@ import { registerEnvironmentTextures } from './assets/environmentAssets';
 import { MAP_HEIGHT, MAP_WIDTH, registerGroundMapTexture } from './assets/groundRenderer';
 import { isoToWorld, Vec2, worldToIso } from './assets/isoMath';
 import { registerVehicleTextures } from './assets/vehicleAssets';
-import { BUSINESS_UNLOCK_LEVEL } from './progression';
+import {
+  BUSINESS_UNLOCK_LEVEL,
+  calculateFuelPayment,
+  calculateServiceCoins,
+  calculateServiceXp,
+  calculateShopBasketTotal,
+  createDefaultPricing,
+  createDefaultRatings,
+  evaluateCustomerSatisfaction,
+  generateShopBasket,
+  getShopAveragePriceRatio,
+  MARKET_FUEL_PRICE,
+} from './progression';
 import {
   ActiveServicePrompt,
+  BusinessRatingsState,
   BusinessUnlockId,
   CharacterRole,
+  CustomerFeedbackEvent,
   DayPhase,
   EmployeeRecord,
   EmployeeRoleId,
   EquippedCosmetics,
+  HappinessState,
   JoystickVector,
+  LiveFuelState,
+  PricingSettings,
   ServiceZoneId,
+  ShopBasketItem,
   UpgradeState,
   VehicleSkinId,
   VehicleType,
@@ -70,6 +88,8 @@ interface CustomerCarEntity {
   waitBadge: Phaser.GameObjects.Container | null;
   waitBg: Phaser.GameObjects.Arc | null;
   waitText: Phaser.GameObjects.Text | null;
+  waitBarFill: Phaser.GameObjects.Rectangle | null;
+  waitEmojiText: Phaser.GameObjects.Text | null;
   wx: number;
   wy: number;
   screenAngle: number;
@@ -77,6 +97,9 @@ interface CustomerCarEntity {
   waypoints: Vec2[];
   state: VehicleAIState;
   stateElapsed: number;
+  patienceRemaining: number;
+  queueWaitElapsed: number;
+  priceTolerance: number;
   paymentTimer: number;
   hasPaid: boolean;
   targetPump: PumpSlot | null;
@@ -134,6 +157,8 @@ export interface SceneCallbacks {
   onPromptChange: (prompt: ActiveServicePrompt | null) => void;
   onActionProgress: (progress: number | null) => void;
   onServiceExecute: (prompt: ActiveServicePrompt, byWorker?: boolean) => boolean;
+  onLiveFuelChange?: (fuel: LiveFuelState | null) => void;
+  onCustomerFeedback?: (feedback: CustomerFeedbackEvent) => void;
   onSceneReady?: () => void;
 }
 
@@ -186,6 +211,9 @@ export class GasStationScene extends Phaser.Scene {
     roomsLevel: 1,
   };
   private currentDayPhase: DayPhase = 'Morning';
+  private ratingsData: BusinessRatingsState = createDefaultRatings();
+  private pricingData: PricingSettings = createDefaultPricing();
+  private shopStockCount = 10;
 
   private player!: Phaser.GameObjects.Sprite;
   private playerWx = 2.6;
@@ -195,6 +223,23 @@ export class GasStationScene extends Phaser.Scene {
   private progressBarBg!: Phaser.GameObjects.Graphics;
   private progressBarFill!: Phaser.GameObjects.Graphics;
   private fuelLiveText!: Phaser.GameObjects.Text;
+
+  private activeFuelSessions: Map<
+    string,
+    {
+      sessionId: string;
+      pumpLabel: string;
+      byWorker: boolean;
+      targetLitres: number;
+      totalPayment: number;
+      pricePerLitre: number;
+      pct: number;
+      source: 'player' | 'worker';
+    }
+  > = new Map();
+  private lastCompletedFuel: LiveFuelState | null = null;
+  private completedFuelHoldTimer = 0;
+  private lastFuelEmitAt = 0;
 
   private worldPromptContainer!: Phaser.GameObjects.Container;
   private worldPromptText!: Phaser.GameObjects.Text;
@@ -237,6 +282,13 @@ export class GasStationScene extends Phaser.Scene {
   private tankCooldown = 0;
 
   private shopReadyBadge!: Phaser.GameObjects.Container;
+  private shopWaitBarFill!: Phaser.GameObjects.Rectangle;
+  private shopMoodEmoji!: Phaser.GameObjects.Text;
+  private shopCustomerNpc: Phaser.GameObjects.Sprite | null = null;
+  private shopPatienceRemaining = 60;
+  private shopCustomerTolerance = 1.0;
+  private shopCustomerBasket: ShopBasketItem[] = [];
+
   private washReadyBadge!: Phaser.GameObjects.Container;
   private roomReadyBadge!: Phaser.GameObjects.Container;
   private roomReadyText!: Phaser.GameObjects.Text;
@@ -280,6 +332,9 @@ export class GasStationScene extends Phaser.Scene {
     dayPhase: DayPhase;
     washSupplies?: number;
     roomNeedsClean?: boolean;
+    shopStock?: number;
+    ratings?: BusinessRatingsState;
+    pricing?: PricingSettings;
     equipped?: EquippedCosmetics;
     cameraSensitivity?: number;
     graphicsQuality?: 'high' | 'balanced';
@@ -292,6 +347,9 @@ export class GasStationScene extends Phaser.Scene {
     this.currentDayPhase = data.dayPhase;
     this.washSupplies = data.washSupplies ?? 100;
     this.roomNeedsClean = data.roomNeedsClean ?? false;
+    if (typeof data.shopStock === 'number') this.shopStockCount = data.shopStock;
+    if (data.ratings) this.ratingsData = data.ratings;
+    if (data.pricing) this.pricingData = data.pricing;
     if (data.equipped) this.equippedCosmetics = data.equipped;
     if (typeof data.cameraSensitivity === 'number') this.cameraSensitivity = data.cameraSensitivity;
     if (data.graphicsQuality) this.graphicsQuality = data.graphicsQuality;
@@ -462,7 +520,10 @@ export class GasStationScene extends Phaser.Scene {
     upgrades: UpgradeState,
     dayPhase: DayPhase,
     washSupplies?: number,
-    roomNeedsClean?: boolean
+    roomNeedsClean?: boolean,
+    shopStock?: number,
+    ratings?: BusinessRatingsState,
+    pricing?: PricingSettings
   ): void {
     const prevUnlocked = new Set(this.unlockedBusinesses);
     this.unlockedBusinesses = new Set(unlocked);
@@ -470,6 +531,9 @@ export class GasStationScene extends Phaser.Scene {
     this.upgradesData = upgrades;
     if (typeof washSupplies === 'number') this.washSupplies = washSupplies;
     if (typeof roomNeedsClean === 'boolean') this.roomNeedsClean = roomNeedsClean;
+    if (typeof shopStock === 'number') this.shopStockCount = shopStock;
+    if (ratings) this.ratingsData = ratings;
+    if (pricing) this.pricingData = pricing;
 
     if (!this.isSceneReady || !this.add) {
       this.currentDayPhase = dayPhase;
@@ -642,7 +706,7 @@ export class GasStationScene extends Phaser.Scene {
       return;
     }
 
-    const prompt = this.currentPrompt;
+    let prompt = this.currentPrompt;
     let duration = prompt.durationSec ?? 1.25;
     let targetCar: CustomerCarEntity | undefined;
 
@@ -653,7 +717,13 @@ export class GasStationScene extends Phaser.Scene {
         targetCar.state = 'REFUELING';
         targetCar.stateElapsed = 0;
       }
-      duration = Math.max(1.0, 2.1 - (this.upgradesData.pumpSpeedLevel - 1) * 0.18);
+      const fuelPrice = this.pricingData.fuelPricePerLitre;
+      prompt = {
+        ...prompt,
+        fuelPricePerLitre: fuelPrice,
+        rewardCoins: calculateFuelPayment(prompt.fuelCost, fuelPrice),
+      };
+      duration = Math.max(0.75, 2.2 - (this.upgradesData.pumpSpeedLevel - 1) * 0.24);
       soundFx.playNozzleAttach();
       soundFx.startFuelPumpLoop();
     } else if (prompt.category === 'wash') {
@@ -670,6 +740,23 @@ export class GasStationScene extends Phaser.Scene {
         this.washBoostTimer = duration + 0.8;
       }
     } else if (prompt.category === 'shop') {
+      const basket =
+        this.shopCustomerBasket.length > 0
+          ? this.shopCustomerBasket
+          : generateShopBasket(
+              this.upgradesData.shopStockLevel,
+              this.unlockedBusinesses.has('shop_deluxe')
+            );
+      const saleCoins = calculateShopBasketTotal(basket, this.pricingData);
+      prompt = {
+        ...prompt,
+        shopBasket: basket,
+        rewardCoins: saleCoins,
+      };
+      duration = Math.max(
+        0.65,
+        1.25 - (this.upgradesData.shopStockLevel - 1) * 0.12 - (this.unlockedBusinesses.has('shop_deluxe') ? 0.15 : 0)
+      );
       soundFx.playCheckout();
     } else if (prompt.category === 'rooms') {
       soundFx.playDoorOpenClose();
@@ -680,6 +767,25 @@ export class GasStationScene extends Phaser.Scene {
     }
 
     this.activeChannel = { prompt, elapsed: 0, duration, targetCar };
+    if (prompt.category === 'fuel' && prompt.fuelCost > 0) {
+      const pricePerLitre = prompt.fuelPricePerLitre ?? this.pricingData.fuelPricePerLitre;
+      const totalPayment = calculateFuelPayment(prompt.fuelCost, pricePerLitre);
+      const targetLitres = prompt.fuelCost;
+      const pumpLabel = prompt.title.split('·')[0].trim() || 'Pump';
+      this.activeFuelSessions.set('player', {
+        sessionId: `player_${prompt.zoneId}_${Date.now()}`,
+        pumpLabel,
+        byWorker: false,
+        targetLitres,
+        totalPayment,
+        pricePerLitre,
+        pct: 0,
+        source: 'player',
+      });
+      this.completedFuelHoldTimer = 0;
+      this.emitLiveFuelState(true);
+    }
+
     const workAnim = `${getPlayerOutfitAnimPrefix(this.equippedCosmetics.playerOutfit)}_work`;
     this.player.play(workAnim, true);
     this.callbacks.onActionProgress(0.01);
@@ -688,6 +794,9 @@ export class GasStationScene extends Phaser.Scene {
   private completeActiveChannel(): void {
     if (!this.activeChannel) return;
     const { prompt, targetCar } = this.activeChannel;
+    const activeFuelSession =
+      prompt.category === 'fuel' ? this.activeFuelSessions.get('player') : undefined;
+    this.activeFuelSessions.delete('player');
     this.activeChannel = null;
     soundFx.stopFuelPumpLoop();
     soundFx.stopCarWashLoop();
@@ -698,7 +807,10 @@ export class GasStationScene extends Phaser.Scene {
     const idleAnim = `${getPlayerOutfitAnimPrefix(this.equippedCosmetics.playerOutfit)}_idle`;
     this.player.play(idleAnim, true);
 
-    if (targetCar && targetCar.hasPaid) return;
+    if (targetCar && targetCar.hasPaid) {
+      this.emitLiveFuelState(true);
+      return;
+    }
 
     const ok = this.callbacks.onServiceExecute(prompt, false);
     if (!ok) {
@@ -713,27 +825,61 @@ export class GasStationScene extends Phaser.Scene {
         'Need More Fuel or Stock!',
         '#FCA5A5'
       );
+      this.emitLiveFuelState(true);
       return;
     }
 
     if (prompt.category === 'fuel') {
       soundFx.playNozzleDetach();
+      if (activeFuelSession) {
+        this.lastCompletedFuel = {
+          sessionId: activeFuelSession.sessionId,
+          pumpLabel: activeFuelSession.pumpLabel,
+          byWorker: false,
+          pricePerLitre: activeFuelSession.pricePerLitre,
+          litresFilled: activeFuelSession.targetLitres,
+          targetLitres: activeFuelSession.targetLitres,
+          totalAmount: activeFuelSession.totalPayment,
+          status: 'completed',
+        };
+        this.completedFuelHoldTimer = 3.2;
+      }
+      this.emitLiveFuelState(true);
     }
 
-    this.applyCompletedServiceVisuals(prompt, this.player.x, this.player.y);
+    this.applyCompletedServiceVisuals(prompt, this.player.x, this.player.y, false);
+  }
+
+  private getHappinessEmoji(h: HappinessState): string {
+    switch (h) {
+      case 'Very Happy':
+        return '😄';
+      case 'Happy':
+        return '😊';
+      case 'Neutral':
+        return '😐';
+      case 'Impatient':
+        return '😠';
+      case 'Angry':
+        return '😡';
+    }
   }
 
   private applyCompletedServiceVisuals(
     prompt: ActiveServicePrompt,
     fxX: number,
     fxY: number,
-    byWorker = false
+    byWorker = false,
+    workerLevel = 1
   ): void {
     const zone = prompt.zoneId;
-    const dispCoins = byWorker
-      ? Math.max(1, Math.round(prompt.rewardCoins * 0.72))
-      : prompt.rewardCoins;
-    const dispXp = byWorker ? Math.max(1, Math.round(prompt.rewardXp * 0.5)) : prompt.rewardXp;
+    const dispCoins =
+      prompt.category === 'fuel' || prompt.category === 'shop'
+        ? prompt.rewardCoins
+        : byWorker
+          ? Math.max(1, Math.round(prompt.rewardCoins * 0.72))
+          : prompt.rewardCoins;
+    const dispXp = calculateServiceXp(prompt.category, prompt.rewardXp, byWorker);
 
     if (zone.startsWith('pump_')) {
       soundFx.playPaymentReceived();
@@ -741,13 +887,36 @@ export class GasStationScene extends Phaser.Scene {
       if (slot && slot.assignedCar) {
         const car = slot.assignedCar;
         car.hasPaid = true;
+        const waitSec = Math.min(
+          60,
+          Math.max(0, 60 - car.patienceRemaining) + Math.min(16, car.queueWaitElapsed * 0.45)
+        );
+        const pricePerLitre = prompt.fuelPricePerLitre ?? this.pricingData.fuelPricePerLitre;
+        const speedBonus =
+          (this.upgradesData.pumpSpeedLevel - 1) * 0.08 +
+          (byWorker ? workerLevel * 0.06 : 0.05);
+        const { score, happiness } = evaluateCustomerSatisfaction({
+          served: true,
+          waitSec,
+          priceRatio: pricePerLitre / MARKET_FUEL_PRICE,
+          customerTolerance: car.priceTolerance,
+          speedBonus,
+        });
+        const emoji = this.getHappinessEmoji(happiness);
+        this.callbacks.onCustomerFeedback?.({
+          business: 'fuel',
+          served: true,
+          waitSec,
+          happiness,
+          score,
+        });
         this.spawnFloatingText(
           fxX,
           fxY - 66,
-          `+$${dispCoins} · +${dispXp} XP`,
+          `${emoji} +$${dispCoins.toFixed(2)} · +${dispXp} XP`,
           byWorker ? '#A7F3D0' : '#4ADE80'
         );
-        this.completeCarPayment(car);
+        this.completeCarPayment(car, emoji);
       }
     } else if (zone === 'car_wash') {
       if (prompt.washSupplyCost && prompt.washSupplyCost < 0) {
@@ -775,10 +944,37 @@ export class GasStationScene extends Phaser.Scene {
       }
     } else if (zone === 'shop') {
       soundFx.playCashRegister();
+      const waitSec = Math.max(0, 60 - this.shopPatienceRemaining);
+      const speedBonus =
+        (this.upgradesData.shopStockLevel - 1) * 0.08 +
+        (this.unlockedBusinesses.has('shop_deluxe') ? 0.12 : 0) +
+        (byWorker ? workerLevel * 0.06 : 0.05);
+      const { score, happiness } = evaluateCustomerSatisfaction({
+        served: true,
+        waitSec,
+        priceRatio: getShopAveragePriceRatio(this.pricingData),
+        customerTolerance: this.shopCustomerTolerance,
+        speedBonus,
+      });
+      const emoji = this.getHappinessEmoji(happiness);
+      this.callbacks.onCustomerFeedback?.({
+        business: 'shop',
+        served: true,
+        waitSec,
+        happiness,
+        score,
+      });
       this.shopCustomerReady = false;
       this.shopReadyBadge.setVisible(false);
-      this.shopCooldown = 6.5;
-      this.spawnFloatingText(fxX, fxY - 66, `+$${dispCoins} · +${dispXp} XP`, '#FACC15');
+      this.shopCustomerNpc?.setVisible(false);
+      this.shopCustomerBasket = [];
+      this.shopCooldown = this.getNextShopCooldown();
+      this.spawnFloatingText(
+        fxX,
+        fxY - 66,
+        `${emoji} +$${dispCoins.toFixed(2)} · +${dispXp} XP`,
+        '#FACC15'
+      );
     } else if (zone === 'rooms') {
       if (prompt.isRoomClean) {
         soundFx.playRoomCleaned();
@@ -956,9 +1152,24 @@ export class GasStationScene extends Phaser.Scene {
     const unlockedPumps = this.pumpSlots.filter((s) =>
       this.unlockedBusinesses.has(s.businessId)
     ).length;
-    const speedBonus = (this.upgradesData.pumpSpeedLevel - 1) * 0.4 + (unlockedPumps - 1) * 0.55;
-    const baseDelay = 9.0 + Math.random() * 6.5;
-    return Math.max(5.8, baseDelay - speedBonus);
+    const fuelRating = this.ratingsData?.fuel?.rating ?? 3.5;
+    const ratingMult = 1.65 - (fuelRating - 1.0) * 0.25; // 1★ -> 1.65x slower, 5★ -> 0.65x faster
+    const priceRatio = this.pricingData.fuelPricePerLitre / MARKET_FUEL_PRICE;
+    const priceMult = Phaser.Math.Clamp(0.75 + priceRatio * 0.28, 0.85, 1.48);
+    const speedBonus = (this.upgradesData.pumpSpeedLevel - 1) * 0.32 + (unlockedPumps - 1) * 0.45;
+    const baseDelay = (8.8 + Math.random() * 4.2) * ratingMult * priceMult;
+    return Phaser.Math.Clamp(baseDelay - speedBonus, 4.4, 24.0);
+  }
+
+  private getNextShopCooldown(): number {
+    const shopRating = this.ratingsData?.shop?.rating ?? 3.5;
+    const ratingMult = 1.6 - (shopRating - 1.0) * 0.23; // 1★ -> 1.6x slower, 5★ -> 0.68x faster
+    const priceRatio = getShopAveragePriceRatio(this.pricingData);
+    const priceMult = Phaser.Math.Clamp(0.75 + priceRatio * 0.28, 0.82, 1.45);
+    const upgradeReduction =
+      (this.upgradesData.shopStockLevel - 1) * 0.35 +
+      (this.unlockedBusinesses.has('shop_deluxe') ? 0.8 : 0);
+    return Phaser.Math.Clamp((7.2 + Math.random() * 2.5) * ratingMult * priceMult - upgradeReduction, 3.4, 19.0);
   }
 
   private buildApproachWaypointsForPump(pump: PumpSlot): Vec2[] {
@@ -1074,6 +1285,8 @@ export class GasStationScene extends Phaser.Scene {
       waitBadge: null,
       waitBg: null,
       waitText: null,
+      waitBarFill: null,
+      waitEmojiText: null,
       wx: startWx,
       wy: startWy,
       screenAngle: 0.46365,
@@ -1084,12 +1297,15 @@ export class GasStationScene extends Phaser.Scene {
       ],
       state: 'SPAWNING',
       stateElapsed: 0,
+      patienceRemaining: 60,
+      queueWaitElapsed: 0,
+      priceTolerance: 0.85 + Math.random() * 0.3,
       paymentTimer: 0,
       hasPaid: false,
       targetPump: null,
       queueIndex: -1,
       fuelNeeded: profile.fuel,
-      payoutCoins: profile.coins,
+      payoutCoins: calculateFuelPayment(profile.fuel, this.pricingData.fuelPricePerLitre),
       rewardXp: profile.xp,
       bobPhase: Math.random() * Math.PI * 2,
     };
@@ -1145,6 +1361,7 @@ export class GasStationScene extends Phaser.Scene {
   private arriveAtPump(car: CustomerCarEntity): void {
     car.state = 'WAITING_FOR_SERVICE';
     car.stateElapsed = 0;
+    car.patienceRemaining = 60;
     car.screenAngle = 0.46365;
     car.sprite.setTexture(`veh_${car.type}_se`).setFlipX(false).setRotation(0);
     soundFx.playVehicleBrake();
@@ -1161,22 +1378,33 @@ export class GasStationScene extends Phaser.Scene {
 
     const badge = this.add.container(carPos.x, carPos.y - 54);
     const bg = this.add
-      .circle(0, 0, 14, 0xfffdf7, 0.94)
-      .setStrokeStyle(2, 0xe02424);
+      .circle(-6, -4, 12, 0xfffdf7, 0.94)
+      .setStrokeStyle(1.8, 0xe02424);
     const txt = this.add
-      .text(0, 0, `${car.fuelNeeded}L`, {
+      .text(-6, -4, `${car.fuelNeeded}L`, {
         fontFamily: 'JetBrains Mono, monospace',
-        fontSize: '9px',
+        fontSize: '8.5px',
         fontStyle: 'bold',
         color: '#2E221D',
       })
       .setOrigin(0.5, 0.5);
-    badge.add([bg, txt]).setDepth(carPos.y + 500);
+    const emojiTxt = this.add
+      .text(13, -4, '😊', { fontSize: '11px' })
+      .setOrigin(0.5, 0.5);
+    const barBg = this.add
+      .rectangle(-18, 12, 36, 4.5, 0x2e221d, 0.85)
+      .setOrigin(0, 0.5)
+      .setStrokeStyle(0.8, 0xfffdf7, 0.7);
+    const barFill = this.add
+      .rectangle(-17, 12, 34, 3, 0x22c55e, 1)
+      .setOrigin(0, 0.5);
+
+    badge.add([bg, txt, emojiTxt, barBg, barFill]).setDepth(carPos.y + 500);
 
     this.tweens.add({
       targets: badge,
-      y: carPos.y - 60,
-      duration: 750,
+      y: carPos.y - 58,
+      duration: 850,
       yoyo: true,
       repeat: -1,
       ease: 'Sine.easeInOut',
@@ -1185,9 +1413,25 @@ export class GasStationScene extends Phaser.Scene {
     car.waitBadge = badge;
     car.waitBg = bg;
     car.waitText = txt;
+    car.waitBarFill = barFill;
+    car.waitEmojiText = emojiTxt;
   }
 
-  private completeCarPayment(car: CustomerCarEntity): void {
+  private handleFuelCustomerAbandoned(car: CustomerCarEntity): void {
+    const pos = worldToIso(car.wx, car.wy);
+    this.spawnFloatingText(pos.x, pos.y - 70, '😡 Timed Out! Left', '#EF4444');
+    soundFx.playLocked();
+    this.callbacks.onCustomerFeedback?.({
+      business: 'fuel',
+      served: false,
+      waitSec: 60,
+      happiness: 'Angry',
+      score: 1.0,
+    });
+    this.departCarFromPump(car.targetPump, car);
+  }
+
+  private completeCarPayment(car: CustomerCarEntity, moodEmoji = '😊'): void {
     car.state = 'PAYMENT_COMPLETED';
     car.stateElapsed = 0;
     car.paymentTimer = 0.65;
@@ -1199,6 +1443,11 @@ export class GasStationScene extends Phaser.Scene {
     if (car.waitBg && car.waitText) {
       car.waitBg.setFillStyle(0xdcfce7, 0.96).setStrokeStyle(2, 0x16a34a);
       car.waitText.setText('PAID').setColor('#15803D');
+    }
+    car.waitEmojiText?.setText(moodEmoji);
+    if (car.waitBarFill) {
+      car.waitBarFill.width = 34;
+      car.waitBarFill.setFillStyle(0x22c55e, 1);
     }
   }
 
@@ -1219,6 +1468,8 @@ export class GasStationScene extends Phaser.Scene {
     car.waitBadge = null;
     car.waitBg = null;
     car.waitText = null;
+    car.waitBarFill = null;
+    car.waitEmojiText = null;
     car.customerNpc?.destroy();
     car.customerNpc = null;
 
@@ -1406,6 +1657,7 @@ export class GasStationScene extends Phaser.Scene {
         }
 
         case 'QUEUED': {
+          car.queueWaitElapsed += dt;
           if (car.waypoints.length > 0) {
             const settled = this.moveCarAlongWaypoints(car, dt, 2.2);
             if (settled) {
@@ -1418,6 +1670,8 @@ export class GasStationScene extends Phaser.Scene {
           );
           if (freePump) {
             this.assignQueuedCarToPump(freePump);
+          } else if (car.queueWaitElapsed > 62) {
+            this.handleFuelCustomerAbandoned(car);
           }
           break;
         }
@@ -1459,6 +1713,27 @@ export class GasStationScene extends Phaser.Scene {
         }
 
         case 'WAITING_FOR_SERVICE': {
+          car.patienceRemaining = Math.max(0, car.patienceRemaining - dt);
+          const ratio = car.patienceRemaining / 60;
+          if (car.waitBarFill) {
+            car.waitBarFill.width = Math.max(1, 34 * ratio);
+            if (ratio > 0.55) {
+              car.waitBarFill.setFillStyle(0x22c55e, 1);
+              car.waitEmojiText?.setText('😊');
+              car.waitBg?.setStrokeStyle(1.8, 0x22c55e);
+            } else if (ratio > 0.25) {
+              car.waitBarFill.setFillStyle(0xfacc15, 1);
+              car.waitEmojiText?.setText('😐');
+              car.waitBg?.setStrokeStyle(1.8, 0xf59e0b);
+            } else {
+              car.waitBarFill.setFillStyle(0xef4444, 1);
+              car.waitEmojiText?.setText('😠');
+              car.waitBg?.setStrokeStyle(1.8, 0xef4444);
+            }
+          }
+          if (car.patienceRemaining <= 0) {
+            this.handleFuelCustomerAbandoned(car);
+          }
           break;
         }
 
@@ -1560,7 +1835,40 @@ export class GasStationScene extends Phaser.Scene {
       return { container, txt };
     };
 
-    this.shopReadyBadge = makeBadge(6.6, 4.0, '🛒', 0xe02424).container;
+    const shopBadgePos = worldToIso(6.5, 4.0);
+    const shopContainer = this.add.container(shopBadgePos.x, shopBadgePos.y - 76);
+    const shopBg = this.add.circle(-6, -4, 12, 0xfffdf7, 0.94).setStrokeStyle(1.8, 0x22c55e);
+    const shopIcon = this.add.text(-6, -4, '🛒', { fontSize: '11px' }).setOrigin(0.5, 0.5);
+    this.shopMoodEmoji = this.add.text(13, -4, '😊', { fontSize: '11px' }).setOrigin(0.5, 0.5);
+    const shopBarBg = this.add
+      .rectangle(-18, 12, 36, 4.5, 0x2e221d, 0.85)
+      .setOrigin(0, 0.5)
+      .setStrokeStyle(0.8, 0xfffdf7, 0.7);
+    this.shopWaitBarFill = this.add
+      .rectangle(-17, 12, 34, 3, 0x22c55e, 1)
+      .setOrigin(0, 0.5);
+    shopContainer
+      .add([shopBg, shopIcon, this.shopMoodEmoji, shopBarBg, this.shopWaitBarFill])
+      .setDepth(shopBadgePos.y + 500)
+      .setVisible(false);
+    this.tweens.add({
+      targets: shopContainer,
+      y: shopBadgePos.y - 81,
+      duration: 820,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+    this.shopReadyBadge = shopContainer;
+
+    const shopCustPos = worldToIso(6.35, 4.28);
+    this.shopCustomerNpc = this.add
+      .sprite(shopCustPos.x, shopCustPos.y, 'char_customer_female', 0)
+      .setOrigin(0.5, 0.88)
+      .setDepth(shopCustPos.y + 4)
+      .play('customer_female_wait')
+      .setVisible(false);
+
     this.washReadyBadge = makeBadge(9.6, 7.6, '🧽', 0x1e73e8).container;
     const roomBadge = makeBadge(11.1, 3.1, '🛏️', 0x7c3aed);
     this.roomReadyBadge = roomBadge.container;
@@ -1798,6 +2106,9 @@ export class GasStationScene extends Phaser.Scene {
         }
       } else if (existing?.sprite?.scene) {
         existing.sprite.setVisible(false);
+        if (emp.id === 'attendant' && this.activeFuelSessions.delete('worker_attendant')) {
+          this.emitLiveFuelState(true);
+        }
       }
     });
   }
@@ -2058,6 +2369,53 @@ export class GasStationScene extends Phaser.Scene {
     this.updateCarWashEffects(dt);
     this.evaluateProximityPrompts();
     this.syncDynamicEnvironmentAudio();
+
+    if (this.completedFuelHoldTimer > 0 && this.activeFuelSessions.size === 0) {
+      this.completedFuelHoldTimer -= dt;
+      if (this.completedFuelHoldTimer <= 0) {
+        this.completedFuelHoldTimer = 0;
+        this.lastCompletedFuel = null;
+        this.emitLiveFuelState(true);
+      }
+    }
+  }
+
+  private emitLiveFuelState(force: boolean): void {
+    const cb = this.callbacks.onLiveFuelChange;
+    if (!cb) return;
+
+    const now = performance.now();
+    if (!force && now - this.lastFuelEmitAt < 75) {
+      return;
+    }
+    this.lastFuelEmitAt = now;
+
+    const active =
+      this.activeFuelSessions.get('player') ??
+      this.activeFuelSessions.get('worker_attendant') ??
+      null;
+
+    if (active) {
+      const clampedPct = Phaser.Math.Clamp(active.pct, 0, 1);
+      const litresFilled = Number((active.targetLitres * clampedPct).toFixed(1));
+      const totalAmount =
+        clampedPct >= 1
+          ? active.totalPayment
+          : Number((active.totalPayment * clampedPct).toFixed(2));
+      cb({
+        sessionId: active.sessionId,
+        pumpLabel: active.pumpLabel,
+        byWorker: active.byWorker,
+        pricePerLitre: active.pricePerLitre,
+        litresFilled,
+        targetLitres: active.targetLitres,
+        totalAmount,
+        status: 'fueling',
+      });
+      return;
+    }
+
+    cb(this.lastCompletedFuel);
   }
 
   private syncDynamicEnvironmentAudio(): void {
@@ -2175,11 +2533,84 @@ export class GasStationScene extends Phaser.Scene {
   private updateBusinessTimers(dt: number): void {
     if (this.tankCooldown > 0) this.tankCooldown = Math.max(0, this.tankCooldown - dt);
 
-    if (this.unlockedBusinesses.has('shop') && !this.shopCustomerReady) {
-      this.shopCooldown -= dt;
-      if (this.shopCooldown <= 0) {
-        this.shopCustomerReady = true;
-        this.shopReadyBadge.setVisible(true);
+    if (this.unlockedBusinesses.has('shop')) {
+      if (!this.shopCustomerReady) {
+        this.shopCooldown -= dt;
+        if (this.shopCooldown <= 0) {
+          if (this.shopStockCount <= 0) {
+            const shopPos = worldToIso(6.5, 4.1);
+            this.spawnFloatingText(shopPos.x, shopPos.y - 68, '😡 Out of Stock!', '#EF4444');
+            this.callbacks.onCustomerFeedback?.({
+              business: 'shop',
+              served: false,
+              waitSec: 12,
+              happiness: 'Angry',
+              score: 1.4,
+            });
+            this.shopCooldown = this.getNextShopCooldown();
+          } else {
+            this.shopCustomerReady = true;
+            this.shopPatienceRemaining = 60;
+            this.shopCustomerTolerance = 0.85 + Math.random() * 0.3;
+            this.shopCustomerBasket = generateShopBasket(
+              this.upgradesData.shopStockLevel,
+              this.unlockedBusinesses.has('shop_deluxe')
+            );
+            const roles: CharacterRole[] = ['customer_male', 'customer_female', 'customer_suit'];
+            const role = roles[Math.floor(Math.random() * roles.length)];
+            if (this.shopCustomerNpc) {
+              this.shopCustomerNpc
+                .setTexture(`char_${role}`, 0)
+                .play(`${role}_wait`)
+                .setVisible(true);
+            }
+            this.shopMoodEmoji?.setText('😊');
+            if (this.shopWaitBarFill) {
+              this.shopWaitBarFill.width = 34;
+              this.shopWaitBarFill.setFillStyle(0x22c55e, 1);
+            }
+            this.shopReadyBadge.setVisible(true);
+          }
+        }
+      } else {
+        const cashierWorking =
+          this.workerEntities.get('cashier')?.state === 'working' &&
+          this.workerEntities.get('cashier')?.targetSlotId === 'shop';
+        const playerCheckout = this.activeChannel?.prompt.zoneId === 'shop';
+        if (!cashierWorking && !playerCheckout) {
+          this.shopPatienceRemaining = Math.max(0, this.shopPatienceRemaining - dt);
+          const ratio = this.shopPatienceRemaining / 60;
+          if (this.shopWaitBarFill) {
+            this.shopWaitBarFill.width = Math.max(1, 34 * ratio);
+            if (ratio > 0.55) {
+              this.shopWaitBarFill.setFillStyle(0x22c55e, 1);
+              this.shopMoodEmoji?.setText('😊');
+            } else if (ratio > 0.25) {
+              this.shopWaitBarFill.setFillStyle(0xfacc15, 1);
+              this.shopMoodEmoji?.setText('😐');
+            } else {
+              this.shopWaitBarFill.setFillStyle(0xef4444, 1);
+              this.shopMoodEmoji?.setText('😠');
+            }
+          }
+          if (this.shopPatienceRemaining <= 0) {
+            const shopPos = worldToIso(6.5, 4.1);
+            this.spawnFloatingText(shopPos.x, shopPos.y - 72, '😡 Shop Wait Too Long!', '#EF4444');
+            soundFx.playLocked();
+            this.callbacks.onCustomerFeedback?.({
+              business: 'shop',
+              served: false,
+              waitSec: 60,
+              happiness: 'Angry',
+              score: 1.0,
+            });
+            this.shopCustomerReady = false;
+            this.shopReadyBadge.setVisible(false);
+            this.shopCustomerNpc?.setVisible(false);
+            this.shopCustomerBasket = [];
+            this.shopCooldown = this.getNextShopCooldown();
+          }
+        }
       }
     }
 
@@ -2249,6 +2680,12 @@ export class GasStationScene extends Phaser.Scene {
           .setPosition(this.player.x, by - 12)
           .setText(`${filledL}/${this.activeChannel.prompt.fuelCost}L`)
           .setVisible(true);
+
+        const session = this.activeFuelSessions.get('player');
+        if (session) {
+          session.pct = pct;
+          this.emitLiveFuelState(false);
+        }
       }
 
       if (this.activeChannel.elapsed >= this.activeChannel.duration) {
@@ -2333,6 +2770,14 @@ export class GasStationScene extends Phaser.Scene {
 
       if (w.state === 'working') {
         w.workTimer -= dt * speedMult;
+        if (w.id === 'attendant') {
+          const session = this.activeFuelSessions.get('worker_attendant');
+          if (session) {
+            const dur = Math.max(0.01, w.pendingDuration);
+            session.pct = Phaser.Math.Clamp(1 - Math.max(0, w.workTimer) / dur, 0, 1);
+            this.emitLiveFuelState(false);
+          }
+        }
         if (w.workTimer <= 0) {
           this.finishWorkerJob(w);
         }
@@ -2357,6 +2802,31 @@ export class GasStationScene extends Phaser.Scene {
             w.state = 'working';
             w.workTimer = w.pendingDuration;
             w.sprite.play(`${w.role}_work`, true);
+            if (w.id === 'attendant' && w.targetSlotId) {
+              const slot = this.pumpSlots.find((s) => s.id === w.targetSlotId);
+              const car = slot?.assignedCar;
+              if (slot && car && car.fuelNeeded > 0) {
+                const totalPayment = calculateServiceCoins(
+                  'fuel',
+                  car.payoutCoins,
+                  this.upgradesData,
+                  this.unlockedBusinesses,
+                  true
+                );
+                this.activeFuelSessions.set('worker_attendant', {
+                  sessionId: `worker_${slot.id}_${car.id}`,
+                  pumpLabel: slot.label,
+                  byWorker: true,
+                  targetLitres: car.fuelNeeded,
+                  totalPayment,
+                  pricePerLitre: totalPayment / Math.max(1, car.fuelNeeded),
+                  pct: 0,
+                  source: 'worker',
+                });
+                this.completedFuelHoldTimer = 0;
+                this.emitLiveFuelState(true);
+              }
+            }
           } else {
             w.state = 'idle';
             w.sprite.play(`${w.role}_idle`, true);
@@ -2394,14 +2864,15 @@ export class GasStationScene extends Phaser.Scene {
           w.targetSlotId = readyPump.id;
           w.targetWx = readyPump.interactWx;
           w.targetWy = readyPump.interactWy;
-          w.pendingDuration = 2.4 + readyPump.assignedCar.fuelNeeded * 0.08;
+          const speedPenalty = Math.max(0.7, 1 - (this.upgradesData.pumpSpeedLevel - 1) * 0.08);
+          w.pendingDuration = (2.2 + readyPump.assignedCar.fuelNeeded * 0.07) * speedPenalty;
           w.state = 'moving';
         }
       } else if (w.id === 'cashier' && this.shopCustomerReady && this.unlockedBusinesses.has('shop')) {
         w.targetSlotId = 'shop';
         w.targetWx = 6.6;
         w.targetWy = 4.2;
-        w.pendingDuration = 3.1;
+        w.pendingDuration = Math.max(1.4, 2.9 - (this.upgradesData.shopStockLevel - 1) * 0.18);
         w.state = 'moving';
       } else if (
         w.id === 'washer' &&
@@ -2454,42 +2925,74 @@ export class GasStationScene extends Phaser.Scene {
     };
 
     if (w.id === 'attendant' && w.targetSlotId) {
+      const workerFuelSession = this.activeFuelSessions.get('worker_attendant');
+      this.activeFuelSessions.delete('worker_attendant');
+      const empRec = this.employeesData.find((e) => e.id === w.id);
+      const workerLevel = empRec?.level ?? 1;
       const slot = this.pumpSlots.find((s) => s.id === w.targetSlotId);
       const car = slot?.assignedCar;
       if (slot && car && car.state === 'REFUELING' && !car.hasPaid) {
+        const fuelPrice = workerFuelSession?.pricePerLitre ?? this.pricingData.fuelPricePerLitre;
+        const fuelTotal = calculateFuelPayment(car.fuelNeeded, fuelPrice);
         const prompt: ActiveServicePrompt = {
           zoneId: slot.id,
           title: slot.label,
           actionLabel: 'Worker Refuel',
           category: 'fuel',
-          rewardCoins: car.payoutCoins,
-          rewardXp: car.rewardXp,
+          rewardCoins: fuelTotal,
+          rewardXp: 150,
           fuelCost: car.fuelNeeded,
+          fuelPricePerLitre: fuelPrice,
           ready: true,
         };
         if (this.callbacks.onServiceExecute(prompt, true)) {
-          this.applyCompletedServiceVisuals(prompt, w.sprite.x, w.sprite.y, true);
+          if (workerFuelSession) {
+            this.lastCompletedFuel = {
+              sessionId: workerFuelSession.sessionId,
+              pumpLabel: workerFuelSession.pumpLabel,
+              byWorker: true,
+              pricePerLitre: workerFuelSession.pricePerLitre,
+              litresFilled: workerFuelSession.targetLitres,
+              targetLitres: workerFuelSession.targetLitres,
+              totalAmount: workerFuelSession.totalPayment,
+              status: 'completed',
+            };
+            this.completedFuelHoldTimer = 3.2;
+          }
+          this.applyCompletedServiceVisuals(prompt, w.sprite.x, w.sprite.y, true, workerLevel);
         } else {
           car.state = 'WAITING_FOR_SERVICE';
           car.stateElapsed = 0;
         }
       }
+      this.emitLiveFuelState(true);
       w.targetSlotId = undefined;
       returnToHome();
     } else if (w.id === 'cashier' && this.shopCustomerReady) {
+      const empRec = this.employeesData.find((e) => e.id === w.id);
+      const workerLevel = empRec?.level ?? 1;
+      const basket =
+        this.shopCustomerBasket.length > 0
+          ? this.shopCustomerBasket
+          : generateShopBasket(
+              this.upgradesData.shopStockLevel,
+              this.unlockedBusinesses.has('shop_deluxe')
+            );
+      const saleCoins = calculateShopBasketTotal(basket, this.pricingData);
       const prompt: ActiveServicePrompt = {
         zoneId: 'shop',
         title: 'Convenience Shop',
         actionLabel: 'Cashier Sale',
         category: 'shop',
-        rewardCoins: 24,
-        rewardXp: 10,
+        rewardCoins: saleCoins,
+        rewardXp: 120,
         fuelCost: 0,
         shopStockCost: 1,
+        shopBasket: basket,
         ready: true,
       };
       if (this.callbacks.onServiceExecute(prompt, true)) {
-        this.applyCompletedServiceVisuals(prompt, w.sprite.x, w.sprite.y, true);
+        this.applyCompletedServiceVisuals(prompt, w.sprite.x, w.sprite.y, true, workerLevel);
       }
       returnToHome();
     } else if (w.id === 'washer' && this.washCustomerReady && this.washSupplies >= 10) {
@@ -2794,16 +3297,18 @@ export class GasStationScene extends Phaser.Scene {
       if (d < 1.95 && d < bestDist) {
         bestDist = d;
         bestAnchor = worldToIso(slot.carWx, slot.carWy - 0.5);
+        const fuelPrice = this.pricingData.fuelPricePerLitre;
         best = {
           zoneId: slot.id,
           title: `${slot.label} · ${car.fuelNeeded}L`,
           actionLabel: `⛽ Refuel (${car.fuelNeeded}L)`,
           category: 'fuel',
-          rewardCoins: car.payoutCoins,
-          rewardXp: car.rewardXp,
+          rewardCoins: calculateFuelPayment(car.fuelNeeded, fuelPrice),
+          rewardXp: 150,
           fuelCost: car.fuelNeeded,
+          fuelPricePerLitre: fuelPrice,
           ready: true,
-          durationSec: 1.25,
+          durationSec: Math.max(0.75, 2.2 - (this.upgradesData.pumpSpeedLevel - 1) * 0.24),
         };
       }
     }
@@ -2812,15 +3317,22 @@ export class GasStationScene extends Phaser.Scene {
     if (dShop < 1.95 && dShop < bestDist && this.unlockedBusinesses.has('shop')) {
       bestDist = dShop;
       bestAnchor = worldToIso(6.6, 3.8);
+      const previewBasketTotal =
+        this.shopCustomerReady && this.shopCustomerBasket.length > 0
+          ? calculateShopBasketTotal(this.shopCustomerBasket, this.pricingData)
+          : 0;
       best = {
         zoneId: 'shop',
         title: this.unlockedBusinesses.has('shop_deluxe') ? 'Supermart Shop' : 'Convenience Shop',
-        actionLabel: this.shopCustomerReady ? '🛒 Ring Up Sale' : 'Waiting for Buyer',
+        actionLabel: this.shopCustomerReady
+          ? `🛒 Checkout ($${previewBasketTotal.toFixed(2)})`
+          : 'Waiting for Buyer',
         category: 'shop',
-        rewardCoins: 24,
-        rewardXp: 10,
+        rewardCoins: previewBasketTotal,
+        rewardXp: 120,
         fuelCost: 0,
         shopStockCost: 1,
+        shopBasket: this.shopCustomerBasket,
         ready: this.shopCustomerReady,
         durationSec: 1.25,
       };

@@ -75,6 +75,60 @@ export interface EmployeeRecord {
   maxLevel: number;
 }
 
+export type HappinessState = 'Very Happy' | 'Happy' | 'Neutral' | 'Impatient' | 'Angry';
+
+export type PriceStatus = 'Cheap' | 'Fair' | 'Expensive' | 'Very Expensive';
+
+export type ShopProductId =
+  | 'cold_drink'
+  | 'chips_snacks'
+  | 'hot_coffee'
+  | 'energy_bar'
+  | 'motor_oil';
+
+export interface ShopProductDefinition {
+  id: ShopProductId;
+  name: string;
+  costPrice: number;
+  marketPrice: number;
+  minPrice: number;
+  maxPrice: number;
+  step: number;
+}
+
+export interface ShopBasketItem {
+  productId: ShopProductId;
+  name: string;
+  qty: number;
+}
+
+export interface PricingSettings {
+  fuelPricePerLitre: number;
+  shopProductPrices: Record<ShopProductId, number>;
+}
+
+export interface BusinessRatingRecord {
+  rating: number; // 1.0 .. 5.0
+  reviewCount: number;
+  happyCustomers: number;
+  angryCustomers: number;
+  lastHappiness: HappinessState;
+}
+
+export interface BusinessRatingsState {
+  fuel: BusinessRatingRecord;
+  shop: BusinessRatingRecord;
+}
+
+export interface CustomerFeedbackEvent {
+  business: 'fuel' | 'shop';
+  served: boolean;
+  waitSec: number;
+  happiness: HappinessState;
+  score: number; // 1.0 .. 5.0
+  reason?: string;
+}
+
 export interface ActiveServicePrompt {
   zoneId: ServiceZoneId;
   title: string;
@@ -89,6 +143,8 @@ export interface ActiveServicePrompt {
   ready: boolean;
   lockedReason?: string;
   durationSec?: number;
+  fuelPricePerLitre?: number;
+  shopBasket?: ShopBasketItem[];
 }
 
 export interface GameTask {
@@ -155,10 +211,32 @@ export interface GameHUDState {
     carsFueled: number;
     carsWashed: number;
     shopSales: number;
+    shopIncome: number;
     roomsRented: number;
     totalEarned: number;
   };
+  ratings: BusinessRatingsState;
+  pricing: PricingSettings;
   toastMessage: string | null;
+}
+
+export interface LiveFuelState {
+  sessionId: string;
+  pumpLabel: string;
+  byWorker: boolean;
+  pricePerLitre: number;
+  litresFilled: number;
+  targetLitres: number;
+  totalAmount: number;
+  status: 'fueling' | 'completed';
+}
+
+export interface LiveShopSaleState {
+  txId: number;
+  amount: number;
+  byWorker: boolean;
+  customerLabel: string;
+  timestamp: number;
 }
 
 export interface JoystickVector {

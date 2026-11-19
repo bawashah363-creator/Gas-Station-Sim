@@ -12,21 +12,33 @@ import { OrientationGuard } from './components/OrientationGuard';
 import { StoreItemDefinition } from './game/catalog';
 import { PhaserGame, PhaserGameHandle } from './game/PhaserGame';
 import {
+  applyRatingFeedback,
+  calculateServiceCoins,
+  calculateServiceXp,
+  createDefaultPricing,
   formatClock,
   getDayPhase,
   getXpRequiredForLevel,
   LEVEL_ROADMAP,
+  MAX_FUEL_PRICE,
+  MIN_FUEL_PRICE,
+  roundCents,
+  SHOP_PRODUCTS,
   UNLOCK_CATALOG,
 } from './game/progression';
 import {
   ActiveServicePrompt,
   BusinessUnlockId,
+  CustomerFeedbackEvent,
   CustomHudLayout,
   EmployeeRoleId,
   GameHUDState,
   GameSettings,
   JoystickVector,
+  LiveFuelState,
+  LiveShopSaleState,
   LobbyProfileMeta,
+  ShopProductId,
   UpgradeState,
 } from './game/types';
 import {
@@ -72,9 +84,12 @@ export default function App() {
   const [isEditingHud, setIsEditingHud] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
+  const [liveFuel, setLiveFuel] = useState<LiveFuelState | null>(null);
+  const [lastShopSale, setLastShopSale] = useState<LiveShopSaleState | null>(null);
 
   const toastTimerRef = useRef<number | null>(null);
   const lastAwardedLevelRef = useRef<number>(hud.level);
+  const shopTxCounterRef = useRef<number>(0);
 
   const showToast = useCallback((msg: string) => {
     setHud((prev) => ({ ...prev, toastMessage: msg }));
@@ -141,9 +156,11 @@ export default function App() {
     hud.tasks,
     hud.upgrades,
     hud.stats,
+    hud.ratings,
+    hud.pricing,
   ]);
 
-  // Sync Phaser scene whenever unlocks, employees, upgrades, or dayPhase change
+  // Sync Phaser scene whenever unlocks, employees, upgrades, stock, ratings, pricing, or dayPhase change
   useEffect(() => {
     gameRef.current?.syncProgress(
       hud.unlockedBusinesses,
@@ -151,7 +168,10 @@ export default function App() {
       hud.upgrades,
       hud.dayPhase,
       hud.washSupplies,
-      hud.roomNeedsClean
+      hud.roomNeedsClean,
+      hud.shopStock,
+      hud.ratings,
+      hud.pricing
     );
   }, [
     hud.unlockedBusinesses,
@@ -160,6 +180,9 @@ export default function App() {
     hud.dayPhase,
     hud.washSupplies,
     hud.roomNeedsClean,
+    hud.shopStock,
+    hud.ratings,
+    hud.pricing,
   ]);
 
   // Android fullscreen, orientation & visibility resume handling
@@ -219,7 +242,7 @@ export default function App() {
             .filter((e) => e.hired && e.assigned)
             .reduce((sum, e) => sum + e.salaryPerDay, 0);
           if (payroll > 0) {
-            nextCoins = Math.max(0, nextCoins - payroll);
+            nextCoins = roundCents(Math.max(0, nextCoins - payroll));
             toast = `Day ${nextDay} · Paid $${payroll} staff wages`;
           } else {
             toast = `Day ${nextDay} Started!`;
@@ -279,7 +302,7 @@ export default function App() {
       nextXp,
       nextLevel,
       nextXpReq,
-      nextCoins: prev.coins + earnedCoins + bonusCoins,
+      nextCoins: roundCents(prev.coins + earnedCoins + bonusCoins),
       unlockedBusinesses: prev.unlockedBusinesses,
     };
   };
@@ -291,6 +314,71 @@ export default function App() {
   const handleActionProgress = useCallback((progress: number | null) => {
     setHud((prev) => ({ ...prev, actionProgress: progress }));
   }, []);
+
+  const handleLiveFuelChange = useCallback((fuel: LiveFuelState | null) => {
+    setLiveFuel(fuel);
+  }, []);
+
+  const handleCustomerFeedback = useCallback(
+    (fb: CustomerFeedbackEvent) => {
+      setHud((prev) => ({
+        ...prev,
+        ratings: {
+          ...prev.ratings,
+          [fb.business]: applyRatingFeedback(prev.ratings[fb.business], fb),
+        },
+      }));
+      if (!fb.served) {
+        showToast(
+          fb.business === 'fuel'
+            ? '😡 Fuel customer left angry! Fuel rating dropped.'
+            : '😡 Shop customer left angry! Shop rating dropped.'
+        );
+      }
+    },
+    [showToast]
+  );
+
+  const handleUpdateFuelPrice = useCallback((nextPrice: number) => {
+    const clamped = roundCents(Math.min(MAX_FUEL_PRICE, Math.max(MIN_FUEL_PRICE, nextPrice)));
+    soundFx.playTap();
+    setHud((prev) => ({
+      ...prev,
+      pricing: {
+        ...prev.pricing,
+        fuelPricePerLitre: clamped,
+      },
+    }));
+  }, []);
+
+  const handleUpdateShopProductPrice = useCallback(
+    (productId: ShopProductId, nextPrice: number) => {
+      const def = SHOP_PRODUCTS.find((p) => p.id === productId);
+      if (!def) return;
+      const clamped = roundCents(Math.min(def.maxPrice, Math.max(def.minPrice, nextPrice)));
+      soundFx.playTap();
+      setHud((prev) => ({
+        ...prev,
+        pricing: {
+          ...prev.pricing,
+          shopProductPrices: {
+            ...prev.pricing.shopProductPrices,
+            [productId]: clamped,
+          },
+        },
+      }));
+    },
+    []
+  );
+
+  const handleResetDefaultPrices = useCallback(() => {
+    soundFx.playTap();
+    setHud((prev) => ({
+      ...prev,
+      pricing: createDefaultPricing(),
+    }));
+    showToast('Restored all prices to Market Rate!');
+  }, [showToast]);
 
   const handleServiceExecute = useCallback(
     (prompt: ActiveServicePrompt, byWorker = false): boolean => {
@@ -338,32 +426,14 @@ export default function App() {
           return prev;
         }
 
-        let mult = 1;
-        if (prompt.category === 'fuel') mult = 1 + (prev.upgrades.pumpSpeedLevel - 1) * 0.2;
-        if (prompt.category === 'wash') {
-          mult =
-            (1 + (prev.upgrades.carWashLevel - 1) * 0.25) *
-            (prev.unlockedBusinesses.includes('wash_pro') ? 1.4 : 1);
-        }
-        if (prompt.category === 'shop') {
-          mult =
-            (1 + (prev.upgrades.shopStockLevel - 1) * 0.25) *
-            (prev.unlockedBusinesses.includes('shop_deluxe') ? 1.35 : 1);
-        }
-        if (prompt.category === 'rooms') {
-          mult =
-            (1 + (prev.upgrades.roomsLevel - 1) * 0.3) *
-            (prev.unlockedBusinesses.includes('rooms_wing') ? 1.45 : 1);
-        }
-
-        const workerCoinMult = byWorker ? 0.72 : 1;
-        const coinDelta =
-          prompt.rewardCoins > 0
-            ? Math.max(1, Math.round(prompt.rewardCoins * mult * workerCoinMult))
-            : prompt.rewardCoins;
-        const earnedXp = byWorker
-          ? Math.max(1, Math.round(prompt.rewardXp * 0.5))
-          : prompt.rewardXp;
+        const coinDelta = calculateServiceCoins(
+          prompt.category,
+          prompt.rewardCoins,
+          prev.upgrades,
+          prev.unlockedBusinesses,
+          byWorker
+        );
+        const earnedXp = calculateServiceXp(prompt.category, prompt.rewardXp, byWorker);
         const nextFuel = Math.min(
           prev.maxFuelLiters,
           Math.max(0, prev.fuelLiters - prompt.fuelCost)
@@ -391,11 +461,16 @@ export default function App() {
 
         const nextStats = {
           ...prev.stats,
-          totalEarned: prev.stats.totalEarned + Math.max(0, coinDelta),
+          totalEarned: roundCents(prev.stats.totalEarned + Math.max(0, coinDelta)),
         };
         if (prompt.category === 'fuel') nextStats.carsFueled += 1;
         if (prompt.category === 'wash' && !isWashRefill) nextStats.carsWashed += 1;
-        if (prompt.category === 'shop') nextStats.shopSales += 1;
+        if (prompt.category === 'shop') {
+          nextStats.shopSales += 1;
+          nextStats.shopIncome = roundCents(
+            (nextStats.shopIncome ?? 0) + Math.max(0, coinDelta)
+          );
+        }
         if (prompt.category === 'rooms' && !isRoomCleaningAction) nextStats.roomsRented += 1;
 
         let newlyCompletedTaskCategory: string | null = null;
@@ -408,7 +483,7 @@ export default function App() {
           if (matchesAction && t.current < t.target) {
             nextCurrent = t.current + 1;
           } else if (t.category === 'earn') {
-            nextCurrent = Math.min(t.target, nextStats.totalEarned);
+            nextCurrent = Math.min(t.target, Math.floor(nextStats.totalEarned));
           }
           if (t.current < t.target && nextCurrent >= t.target) {
             newlyCompletedTaskCategory = t.category;
@@ -439,6 +514,35 @@ export default function App() {
           tasks: nextTasks,
         };
       });
+
+      if (prompt.category === 'shop') {
+        const shopSaleCoins = calculateServiceCoins(
+          'shop',
+          prompt.rewardCoins,
+          cur.upgrades,
+          cur.unlockedBusinesses,
+          byWorker
+        );
+        if (shopSaleCoins > 0) {
+          shopTxCounterRef.current += 1;
+          const basketSummary =
+            prompt.shopBasket && prompt.shopBasket.length > 0
+              ? `${prompt.shopBasket
+                  .slice(0, 2)
+                  .map((b) => (b.qty > 1 ? `${b.qty}x ${b.name}` : b.name))
+                  .join(', ')}${prompt.shopBasket.length > 2 ? ` +${prompt.shopBasket.length - 2}` : ''}`
+              : byWorker
+                ? 'Cashier Checkout'
+                : 'Customer Purchase';
+          setLastShopSale({
+            txId: shopTxCounterRef.current,
+            amount: shopSaleCoins,
+            byWorker,
+            customerLabel: basketSummary,
+            timestamp: Date.now(),
+          });
+        }
+      }
 
       return true;
     },
@@ -607,7 +711,7 @@ export default function App() {
       showToast('Upgrade Installed!');
       return {
         ...prev,
-        coins: prev.coins - cost,
+        coins: roundCents(prev.coins - cost),
         maxFuelLiters: nextMaxFuel,
         maxShopStock: nextMaxShop,
         upgrades: nextUpgrades,
@@ -639,7 +743,7 @@ export default function App() {
       showToast(`Hired ${emp.name} (${emp.roleLabel})!`);
       return {
         ...prev,
-        coins: prev.coins - emp.hireCost,
+        coins: roundCents(prev.coins - emp.hireCost),
         employees: nextEmployees,
         tasks: nextTasks,
       };
@@ -657,7 +761,7 @@ export default function App() {
       showToast(`${emp.name} trained to Lv.${emp.level + 1}!`);
       return {
         ...prev,
-        coins: prev.coins - cost,
+        coins: roundCents(prev.coins - cost),
         employees: prev.employees.map((e) =>
           e.id === id ? { ...e, level: e.level + 1 } : e
         ),
@@ -682,7 +786,7 @@ export default function App() {
       showToast(`Delivered +${liters} L Fuel!`);
       return {
         ...prev,
-        coins: prev.coins - costCoins,
+        coins: roundCents(prev.coins - costCoins),
         fuelLiters: Math.min(prev.maxFuelLiters, prev.fuelLiters + liters),
       };
     });
@@ -695,7 +799,7 @@ export default function App() {
       showToast(`Restocked +${units} Store Items!`);
       return {
         ...prev,
-        coins: prev.coins - costCoins,
+        coins: roundCents(prev.coins - costCoins),
         shopStock: Math.min(prev.maxShopStock, prev.shopStock + units),
       };
     });
@@ -708,7 +812,7 @@ export default function App() {
       showToast(`Refilled +${units} Wash Soap & Water!`);
       return {
         ...prev,
-        coins: prev.coins - costCoins,
+        coins: roundCents(prev.coins - costCoins),
         washSupplies: Math.min(prev.maxWashSupplies, prev.washSupplies + units),
       };
     });
@@ -738,7 +842,7 @@ export default function App() {
 
       return {
         ...prev,
-        coins: prev.coins - def.cost,
+        coins: roundCents(prev.coins - def.cost),
         maxShopStock: nextMaxShop,
         shopStock: nextShopStock,
         maxFuelLiters: nextMaxFuel,
@@ -753,6 +857,8 @@ export default function App() {
     const fresh = clearGameSave();
     lastAwardedLevelRef.current = fresh.level;
     setHud({ ...fresh, diamonds: metaRef.current.gemWallet.balance });
+    setLiveFuel(null);
+    setLastShopSale(null);
     setActiveModal(null);
     gameRef.current?.setPaused(false);
     showToast('Started fresh career at Level 1!');
@@ -773,12 +879,17 @@ export default function App() {
         initialDayPhase={hud.dayPhase}
         initialWashSupplies={hud.washSupplies}
         initialRoomNeedsClean={hud.roomNeedsClean}
+        initialShopStock={hud.shopStock}
+        initialRatings={hud.ratings}
+        initialPricing={hud.pricing}
         initialEquipped={meta.equipped}
         initialSensitivity={settings.cameraSensitivity}
         initialGraphicsQuality={settings.graphicsQuality}
         onPromptChange={handlePromptChange}
         onActionProgress={handleActionProgress}
         onServiceExecute={handleServiceExecute}
+        onLiveFuelChange={handleLiveFuelChange}
+        onCustomerFeedback={handleCustomerFeedback}
       />
 
       {/* Warm Cream Mobile Simulator Gameplay HUD */}
@@ -788,6 +899,8 @@ export default function App() {
           settings={settings}
           hudLayout={hudLayout}
           playerOutfit={meta.equipped.playerOutfit}
+          liveFuel={liveFuel}
+          lastShopSale={lastShopSale}
           isFullscreen={isFullscreen}
           onToggleFullscreen={handleToggleFullscreen}
           onOpenModal={handleOpenModal}
@@ -838,6 +951,9 @@ export default function App() {
         onBuyShopSupply={handleBuyShopSupply}
         onBuyWashSupply={handleBuyWashSupply}
         onUnlockBusiness={handleUnlockBusiness}
+        onUpdateFuelPrice={handleUpdateFuelPrice}
+        onUpdateShopProductPrice={handleUpdateShopProductPrice}
+        onResetDefaultPrices={handleResetDefaultPrices}
         onUpdateSettings={(partial) => {
           if (partial.muteAll !== true && partial.soundEnabled !== false) {
             soundFx.playTap();

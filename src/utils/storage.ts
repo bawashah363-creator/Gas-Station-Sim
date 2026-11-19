@@ -1,9 +1,15 @@
 import { STARTER_OWNED_ITEMS } from '../game/catalog';
 import {
+  createDefaultPricing,
+  createDefaultRatings,
   createInitialGameState,
   DEFAULT_CUSTOM_HUD,
   getUnlockedForLevel,
   getXpRequiredForLevel,
+  MAX_FUEL_PRICE,
+  MIN_FUEL_PRICE,
+  roundCents,
+  SHOP_PRODUCTS,
 } from '../game/progression';
 import {
   CustomHudLayout,
@@ -65,11 +71,40 @@ export function loadGameState(): GameHUDState {
       ? Array.from(new Set(['pump_1' as const, ...parsed.unlockedBusinesses]))
       : getUnlockedForLevel(level);
 
+    const defaultRatings = createDefaultRatings();
+    const defaultPricing = createDefaultPricing();
+
+    const clampRating = (val: unknown, fallback: number) =>
+      typeof val === 'number' && Number.isFinite(val)
+        ? Math.min(5, Math.max(1, roundCents(val)))
+        : fallback;
+
+    const restoredFuelPrice =
+      typeof parsed.pricing?.fuelPricePerLitre === 'number' &&
+      Number.isFinite(parsed.pricing.fuelPricePerLitre)
+        ? Math.min(MAX_FUEL_PRICE, Math.max(MIN_FUEL_PRICE, roundCents(parsed.pricing.fuelPricePerLitre)))
+        : defaultPricing.fuelPricePerLitre;
+
+    const restoredShopPrices = { ...defaultPricing.shopProductPrices };
+    SHOP_PRODUCTS.forEach((prod) => {
+      const savedPrice = parsed.pricing?.shopProductPrices?.[prod.id];
+      if (typeof savedPrice === 'number' && Number.isFinite(savedPrice)) {
+        restoredShopPrices[prod.id] = Math.min(
+          prod.maxPrice,
+          Math.max(prod.minPrice, roundCents(savedPrice))
+        );
+      }
+    });
+
     return {
       ...base,
       ...parsed,
       level,
       xpToNext,
+      coins:
+        typeof parsed.coins === 'number' && Number.isFinite(parsed.coins)
+          ? roundCents(parsed.coins)
+          : base.coins,
       isPaused: false,
       activePrompt: null,
       actionProgress: null,
@@ -77,6 +112,22 @@ export function loadGameState(): GameHUDState {
       unlockedBusinesses: savedUnlocks,
       upgrades: { ...base.upgrades, ...(parsed.upgrades ?? {}) },
       stats: { ...base.stats, ...(parsed.stats ?? {}) },
+      ratings: {
+        fuel: {
+          ...defaultRatings.fuel,
+          ...(parsed.ratings?.fuel ?? {}),
+          rating: clampRating(parsed.ratings?.fuel?.rating, defaultRatings.fuel.rating),
+        },
+        shop: {
+          ...defaultRatings.shop,
+          ...(parsed.ratings?.shop ?? {}),
+          rating: clampRating(parsed.ratings?.shop?.rating, defaultRatings.shop.rating),
+        },
+      },
+      pricing: {
+        fuelPricePerLitre: restoredFuelPrice,
+        shopProductPrices: restoredShopPrices,
+      },
       employees: base.employees.map((def) => {
         const saved = parsed.employees?.find((e) => e.id === def.id);
         return saved
@@ -129,6 +180,8 @@ export function saveGameState(state: GameHUDState): void {
       tasks: state.tasks,
       upgrades: state.upgrades,
       stats: state.stats,
+      ratings: state.ratings,
+      pricing: state.pricing,
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(serializable));
   } catch {
