@@ -1,0 +1,10 @@
+{
+  "short_name": "Gas Station",
+  "name": "Gas Station Simulator",
+  "description": "Colorful 2.5D isometric gas station simulator game.",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0f172a",
+  "theme_color": "#1e293b",
+  "start_url": "/"
+}

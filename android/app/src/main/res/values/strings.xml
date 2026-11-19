@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Gas Station Simulator</string>
+    <string name="title_activity_main">Gas Station Simulator</string>
+    <string name="package_name">com.zaidiinteractive.gasstationsim</string>
+    <string name="custom_url_scheme">com.zaidiinteractive.gasstationsim</string>
+</resources>

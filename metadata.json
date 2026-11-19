@@ -1,0 +1,6 @@
+{
+  "name": "Gas Station Simulator",
+  "description": "Colorful 2.5D isometric gas station simulator game with fuel pumps, convenience store, car wash, and rooms for rent.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
